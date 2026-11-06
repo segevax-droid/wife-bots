@@ -1,0 +1,8 @@
+aiogram>=3.13,<4
+aiohttp>=3.9
+gspread-asyncio>=2.0
+google-auth>=2.0
+google-auth-httplib2>=0.2
+Pillow>=10.0
+python-dotenv>=1.0
+certifi>=2024.0
