@@ -51,9 +51,33 @@ def _parse_json_obj(raw: str) -> dict:
         return {}
 
 
+async def _coach_fields_for_plan(mapped: List[Dict[str, Any]], source: str = "") -> Dict[str, str]:
+    names = ", ".join(e["name"] for e in mapped[:10])
+    prompt = (
+        "Ты дружелюбный тренер. По списку упражнений верни ТОЛЬКО JSON без markdown: "
+        '{"title":"короткое название тренировки","warmup_note":"2-3 предложения про разминку",'
+        '"coach_note":"1-2 предложения мотивации и логики плана"}. '
+        f"Упражнения: {names}. Контекст: {source[:500]}"
+    )
+    raw = await call_gemini(prompt)
+    if raw.startswith("⚠️") or raw.startswith("⏳"):
+        return {}
+    data = _parse_json_obj(raw)
+    return {
+        k: str(data[k]).strip()
+        for k in ("title", "warmup_note", "coach_note")
+        if data.get(k)
+    }
+
+
 async def parse_workout_plan(text: str, db: ExerciseDB) -> Dict[str, Any]:
     prompt = f'''Преобразуй план тренировки в JSON. Только JSON без markdown.
-Формат: {{"exercises":[{{"name":"...", "sets":3, "reps_target":10, "weight_kg":null}}]}}
+Формат: {{
+  "title":"название",
+  "warmup_note":"краткая разминка",
+  "coach_note":"зачем такой порядок",
+  "exercises":[{{"name":"...", "sets":3, "reps_target":10, "weight_kg":null}}]
+}}
 Имена упражнений на русском как в тексте. weight_kg число или null.
 Текст плана:
 {text}
@@ -64,7 +88,14 @@ async def parse_workout_plan(text: str, db: ExerciseDB) -> Dict[str, Any]:
     data = _parse_json_obj(raw)
     if not data:
         return {"exercises": [], "error": "parse"}
-    return {"exercises": _map_exercises(data, db)}
+    mapped = _map_exercises(data, db)
+    out: Dict[str, Any] = {"exercises": mapped}
+    for k in ("title", "warmup_note", "coach_note"):
+        if data.get(k):
+            out[k] = str(data[k]).strip()
+    if mapped and not out.get("coach_note"):
+        out.update(await _coach_fields_for_plan(mapped, text[:400]))
+    return out
 
 
 def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
@@ -85,6 +116,9 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
             if len(picked) >= 6:
                 break
     return {
+        "title": "Силовой full body",
+        "warmup_note": "5–7 минут: круговые движения суставами, лёгкие приседы и махи руками, 1–2 разминочных подхода в первых упражнениях.",
+        "coach_note": "Сбалансированный микс: ноги → тяга/спина → жим → плечи/руки — классика для всего тела.",
         "exercises": [
             {
                 "exercise_id": e["id"],
@@ -95,7 +129,7 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
                 "weight_kg": None,
             }
             for e in picked[:8]
-        ]
+        ],
     }
 
 
@@ -108,7 +142,8 @@ async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any
         "Ты дружелюбный тренер. Составь план на 1 тренировку (5–8 упражнений) ТОЛЬКО из каталога. "
         "Бери точные name из каталога, без «упражнение 1/2». "
         "Только JSON без markdown: "
-        '{"exercises":[{"name":"...","sets":3,"reps_target":10,"weight_kg":null}]}. '
+        '{"title":"...","warmup_note":"2-3 предложения","coach_note":"мотивация и логика",'
+        '"exercises":[{"name":"...","sets":3,"reps_target":10,"weight_kg":null}]}. '
         f"Подсказка: {hint or 'общее развитие силы'}. "
         f"Каталог: {json.dumps(catalog, ensure_ascii=False)[:4000]}"
     )
@@ -117,7 +152,13 @@ async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any
         data = _parse_json_obj(raw)
         mapped = _map_exercises(data, db) if data else []
         if mapped:
-            return {"exercises": mapped}
+            out: Dict[str, Any] = {"exercises": mapped}
+            for k in ("title", "warmup_note", "coach_note"):
+                if data.get(k):
+                    out[k] = str(data[k]).strip()
+            if not out.get("coach_note"):
+                out.update(await _coach_fields_for_plan(mapped, hint))
+            return out
     local = _local_fullbody_plan(db)
     if local["exercises"]:
         local["note"] = "Gemini недоступен — собран базовый план из базы упражнений."
@@ -126,7 +167,11 @@ async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any
 
 
 def plan_to_state(plan: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    st: Dict[str, Any] = {
         "plan_id": str(uuid.uuid4())[:8],
         "exercises": plan.get("exercises", []),
     }
+    for k in ("title", "warmup_note", "coach_note", "note"):
+        if plan.get(k):
+            st[k] = plan[k]
+    return st

@@ -13,7 +13,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.common import record_user_chat
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.nutrition.food import log_meal_row, parse_meal_grams, resolve_staple_macros, sanity
-from app.nutrition.norms import load_norm_targets, progress_bar, recalc_norms_for_user, today_intake
+from app.nutrition.norms import load_norm_targets, recalc_norms_for_user, today_intake
+from app.nutrition.ux import bank_message, meal_logged_praise
 from app.sheets import append_row_to_sheet, get_settings_map, get_sheet_rows_for_period, set_setting
 from app.state import now_local
 
@@ -34,11 +35,11 @@ class NutWeigh(StatesGroup):
 
 def _main_kb() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="Записать вес", callback_data="nut_weigh")],
-        [InlineKeyboardButton(text="Копилка дня", callback_data="nut_bank")],
-        [InlineKeyboardButton(text="Список покупок", callback_data="nut_shop")],
-        [InlineKeyboardButton(text="Заново заполнить профиль", callback_data="nut_onboard")],
-        [InlineKeyboardButton(text="Проверить Gemini", callback_data="check_gemini_quota")],
+        [InlineKeyboardButton(text="⚖️ Записать вес", callback_data="nut_weigh")],
+        [InlineKeyboardButton(text="💰 Копилка дня", callback_data="nut_bank")],
+        [InlineKeyboardButton(text="🛒 Список покупок", callback_data="nut_shop")],
+        [InlineKeyboardButton(text="👤 Профиль заново", callback_data="nut_onboard")],
+        [InlineKeyboardButton(text="🤖 Проверить Gemini", callback_data="check_gemini_quota")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -53,8 +54,8 @@ def _after_food_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Копилка дня", callback_data="nut_bank"),
-                InlineKeyboardButton(text="Записать вес", callback_data="nut_weigh"),
+                InlineKeyboardButton(text="💰 Копилка", callback_data="nut_bank"),
+                InlineKeyboardButton(text="⚖️ Вес", callback_data="nut_weigh"),
             ]
         ]
     )
@@ -87,7 +88,7 @@ async def _save_weight(message: types.Message, w: float, source: str = "manual")
     )
     reason = "weight" if had_weight else "onboarding"
     msg = await recalc_norms_for_user({**s, "weight_kg": f"{w:.1f}"}, reason=reason)
-    await message.answer(f"Отлично, вес <b>{w:.1f} кг</b> записала ✨")
+    await message.answer(f"⚖️ Отлично, вес <b>{w:.1f} кг</b> — записала ✨")
     if msg:
         await message.answer(msg)
     await message.answer("Чем ещё помочь?", reply_markup=_main_kb())
@@ -152,8 +153,10 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
     await log_meal_row(staple, grams, m)
     kcal = m["kcal"] * grams / 100
     await message.answer(
-        f"Записала 🍽\n<b>{staple}</b> — {grams:.0f} г\n"
-        f"≈ {kcal:.0f} ккал (Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})",
+        f"{meal_logged_praise(kcal, s.get('goal', ''))}\n\n"
+        f"<b>{staple}</b> — {grams:.0f} г\n"
+        f"≈ <b>{kcal:.0f}</b> ккал · Б <b>{m['p']*grams/100:.1f}</b> / "
+        f"Ж <b>{m['f']*grams/100:.1f}</b> / У <b>{m['c']*grams/100:.1f}</b> г",
         reply_markup=_after_food_kb(),
     )
 
@@ -179,10 +182,11 @@ async def nut_start(message: types.Message, state: FSMContext):
         return
     await message.answer(
         "Привет! Я рядом с питанием 💛\n\n"
-        "• Еда — текстом, голосом или фото («овсянка 200г»)\n"
-        "• Вес — кнопка «Записать вес» или число <code>90</code>\n"
-        "• Копилка — сколько уже съела за день\n\n"
-        "Каждое утро в 8:30 напомню взвеситься.",
+        "🍽 <b>Еда</b> — текст, голос или фото («овсянка 200г»)\n"
+        "⚖️ <b>Вес</b> — кнопка или число <code>90</code>\n"
+        "💰 <b>Копилка</b> — красивый прогресс БЖУ за день\n"
+        "🛒 <b>Покупки</b> — список от ИИ под твою цель\n\n"
+        "Каждое утро в 8:30 мягко напомню взвеситься ☀️",
         reply_markup=_main_kb(),
     )
 
@@ -358,13 +362,7 @@ async def cb_bank(call: types.CallbackQuery):
         await call.answer("Нет профиля", show_alert=True)
         return
     p, f_, c, k = await today_intake()
-    text = (
-        f"<b>Копилка дня</b>\n"
-        f"Калории  {progress_bar(k, tgt['kcal'])}  {k:.0f} / {tgt['kcal']:.0f}\n"
-        f"Белки    {progress_bar(p, tgt['p'])}  {p:.0f} / {tgt['p']:.0f} г\n"
-        f"Жиры     {progress_bar(f_, tgt['f'])}  {f_:.0f} / {tgt['f']:.0f} г\n"
-        f"Углеводы {progress_bar(c, tgt['c'])}  {c:.0f} / {tgt['c']:.0f} г"
-    )
+    text = bank_message(p, f_, c, k, tgt)
     await call.message.answer(text, reply_markup=_main_kb())
     await call.answer()
 
@@ -372,7 +370,7 @@ async def cb_bank(call: types.CallbackQuery):
 @nutrition_router.callback_query(F.data == "nut_shop")
 async def cb_shop(call: types.CallbackQuery):
     await call.answer()
-    await call.message.answer("Составляю список покупок…")
+    await call.message.answer("🛒 Составляю список покупок под твою цель…")
     rows = await get_sheet_rows_for_period("Питание", 4, date_col=0)
     sample = "\n".join([str(r[2]) for r in rows[-12:] if len(r) > 2])
     s = await get_settings_map()

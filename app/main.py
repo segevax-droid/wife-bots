@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiogram.types import CallbackQuery, ErrorEvent, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from app.bot_filters import IsBotToken
@@ -29,6 +30,8 @@ from app.trainer.router import trainer_router
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("wife_bots")
 
+_BOOT_WEBHOOKS_OK = False
+
 
 class InjectBotsMiddleware(BaseMiddleware):
     def __init__(self, trainer: Bot, nutrition: Bot):
@@ -44,6 +47,24 @@ class InjectBotsMiddleware(BaseMiddleware):
 def build_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+
+    @dp.errors()
+    async def on_handler_error(event: ErrorEvent):
+        logger.exception("update handler failed: %s", event.exception)
+        upd = event.update
+        text = "⚠️ Что-то пошло не так. Жми /start или /menu — попробуем снова."
+        try:
+            if upd.callback_query:
+                cq: CallbackQuery = upd.callback_query
+                if cq.message:
+                    await cq.message.answer(text)
+                await cq.answer("Ошибка", show_alert=False)
+            elif upd.message:
+                msg: Message = upd.message
+                await msg.answer(text)
+        except Exception as notify_err:
+            logger.warning("could not notify user about error: %s", notify_err)
+
     register_acl(dp)
     dp.message.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
@@ -60,6 +81,17 @@ def build_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
     return dp
 
 
+async def _sheets_warmup() -> None:
+    try:
+        await asyncio.wait_for(load_state_from_sheet(), timeout=45)
+    except Exception as e:
+        logger.exception("load_state_from_sheet: %s", e)
+    try:
+        await asyncio.wait_for(ensure_sheets(), timeout=120)
+    except Exception as e:
+        logger.exception("ensure_sheets: %s", e)
+
+
 async def run_polling():
     if not WIFE_TRAINER_TOKEN or not WIFE_NUTRITION_TOKEN:
         logger.error("Missing bot tokens")
@@ -67,8 +99,7 @@ async def run_polling():
     bot_trainer = Bot(WIFE_TRAINER_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot_nutrition = Bot(WIFE_NUTRITION_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = build_dispatcher(bot_trainer, bot_nutrition)
-    await load_state_from_sheet()
-    await ensure_sheets()
+    await _sheets_warmup()
     asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
     await dp.start_polling(bot_trainer, bot_nutrition, allowed_updates=dp.resolve_used_update_types())
 
@@ -95,7 +126,8 @@ def create_app() -> web.Application:
     nutrition_wh.register(app, path="/webhook/nutrition")
 
     async def health(_):
-        return web.Response(text="ok")
+        status = "ok" if _BOOT_WEBHOOKS_OK else "ok (webhooks pending)"
+        return web.Response(text=status)
 
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -105,18 +137,24 @@ def create_app() -> web.Application:
     base = WIFE_RENDER_EXTERNAL_URL.rstrip("/")
 
     async def _boot_background():
+        global _BOOT_WEBHOOKS_OK
+        wh_kw = {}
+        if secret:
+            wh_kw["secret_token"] = secret
         try:
-            await load_state_from_sheet()
-            await ensure_sheets()
-            wh_kw = {}
-            if secret:
-                wh_kw["secret_token"] = secret
-            await bot_trainer.set_webhook(f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw)
-            await bot_nutrition.set_webhook(f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw)
+            await bot_trainer.set_webhook(
+                f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw
+            )
+            await bot_nutrition.set_webhook(
+                f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw
+            )
+            _BOOT_WEBHOOKS_OK = True
             logger.info("Webhooks set: %s/webhook/trainer|nutrition", base)
-            asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
         except Exception as e:
-            logger.exception("startup boot failed: %s", e)
+            logger.exception("set_webhook failed: %s", e)
+            return
+        await _sheets_warmup()
+        asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
 
     async def _startup(_):
         # Bind port first; sheets + setWebhook in background so Render sees an open port.

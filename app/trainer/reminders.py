@@ -36,7 +36,10 @@ async def maybe_send_workout_reminders(bot_trainer: Bot) -> None:
     key = f"remind_train_{today.isoformat()}_{slot}"
     if SYSTEM_STATE.get(key) == "1":
         return
-    text = "Давно не было тренировки. Выбери действие:"
+    text = (
+        "👋 Давно не виделись в зале — тело скучает по движению.\n"
+        "Можем лёгкий домашний комплекс или свежий план ИИ — как удобнее?"
+    )
     try:
         await bot_trainer.send_message(int(cid), text, reply_markup=reminder_train_kb())
     except Exception:
@@ -46,9 +49,10 @@ async def maybe_send_workout_reminders(bot_trainer: Bot) -> None:
 
 async def handle_light_home(bot: Bot, chat_id: int) -> None:
     text = (
-        "Лёгкая дома 10–15 мин:\n"
-        "1) Разминка суставов 3 мин\n"
-        "2) Присед/отжимание/планка по 2×15\n"
-        "3) Заминка дыхание 2 мин"
+        "🏠 <b>Лёгкая дома</b> · 10–15 мин\n\n"
+        "🫧 <b>Разминка</b> — круговые движения суставами, 3 мин\n"
+        "💪 <b>Блок</b> — приседы, отжимания, планка: по 2×15, отдых 60с\n"
+        "🌿 <b>Заминка</b> — медленное дыхание 2 мин\n\n"
+        "<i>Считай это победой: главное — двигаться.</i>"
     )
     await bot.send_message(chat_id, text)

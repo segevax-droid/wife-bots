@@ -36,6 +36,19 @@ from app.trainer.plan_parse import generate_workout_plan, parse_workout_plan, pl
 from app.trainer.progression import next_load_hint
 from app.trainer.reminders import handle_light_home
 from app.trainer.reports import compare_last_session, report_vs_avg_four_weeks, week_month_top_moves
+from app.trainer.ux import (
+    checkin_nudge,
+    checkin_question,
+    exercise_card,
+    format_plan_message,
+    format_technique_message,
+    parse_error_friendly,
+    pre_begin_message,
+    praise_after_set,
+    rest_ping_message,
+    session_kickoff,
+    workout_finish_prompt,
+)
 
 trainer_router = Router(name="trainer")
 
@@ -139,11 +152,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Привет! Я твой тренер 💪\n\n"
-        "• <b>План</b> — соберём тренировку\n"
-        "• <b>Старт</b> — чек-ин и живые подходы\n"
-        "• <b>Отчёты / календарь</b> — как растёшь\n"
-        "• <b>Проверить Gemini</b> — связь с ИИ\n\n"
-        "Готова? Жми «План» или «Старт».",
+        "🏋️ <b>Старт</b> — чек-ин, подбадривания и подходы в живом темпе\n"
+        "📋 <b>План</b> — ИИ соберёт тренировку с разминкой и пояснениями\n"
+        "📊 <b>Отчёты и календарь</b> — прогресс без скуки\n"
+        "🔧 <b>Техника</b> на каждом упражнении — кнопкой или голосом <code>40×10</code>\n\n"
+        "С чего начнём?",
         reply_markup=trainer_main_kb(),
     )
     await record_user_chat("trainer", message.chat.id)
@@ -184,8 +197,10 @@ async def cb_resume(call: types.CallbackQuery, state: FSMContext):
 @trainer_router.callback_query(F.data == "tr_plan_menu")
 async def cb_plan_menu(call: types.CallbackQuery):
     await call.message.answer(
-        "План: «Составить план ИИ» — тренер сам соберёт тренировку.\n"
-        "Или пришли текст / «/plan …» — разберём вручную.",
+        "📋 <b>План тренировки</b>\n\n"
+        "• <b>Составить план ИИ</b> — название, разминка, порядок и подходы\n"
+        "• Пришли свой текст или <code>/plan …</code> — разложу по упражнениям\n"
+        "• <b>Последний план</b> — посмотреть, что уже готово",
         reply_markup=plan_menu_kb(),
     )
     await call.answer()
@@ -194,7 +209,7 @@ async def cb_plan_menu(call: types.CallbackQuery):
 @trainer_router.callback_query(F.data == "tr_gen_plan")
 async def cb_gen_plan(call: types.CallbackQuery):
     await call.answer()
-    await call.message.answer("Собираю план из твоей базы упражнений…")
+    await call.message.answer("🧠 Собираю план из твоей базы — минутку, продумываю порядок и разминку…")
     db = await ExerciseDB.load()
     if not db.by_id:
         await call.message.answer("В таблице нет упражнений. Заполни лист «Список упражнений».")
@@ -221,14 +236,8 @@ async def _save_plan(message: types.Message, plan: dict) -> None:
     st = plan_to_state(plan)
     await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
     await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
-    n = len(st.get("exercises", []))
-    names = ", ".join(e["name"] for e in st.get("exercises", [])[:8])
-    extra = ("\n<i>" + plan["note"] + "</i>") if plan.get("note") else ""
-    lines = "\n".join(f"• {e['name']} — {e['sets']}×{e['reps_target']}" for e in st.get("exercises", []))
-    await message.answer(
-        f"<b>План готов</b> ({n} упражнений){extra}\n{lines}",
-        reply_markup=trainer_main_kb(),
-    )
+    db = await ExerciseDB.load()
+    await message.answer(format_plan_message(plan if plan.get("title") else {**plan, **st}, db), reply_markup=trainer_main_kb())
 
 
 async def _ingest_plan_msg(message: types.Message):
@@ -258,8 +267,11 @@ async def cb_last_plan(call: types.CallbackQuery):
         await call.message.answer("Сохранённого плана нет. Нажми «План тренировки».", reply_markup=trainer_main_kb())
         await call.answer()
         return
-    lines = "\n".join(f"• {e.get('name')} — {e.get('sets')}×{e.get('reps_target')}" for e in exs)
-    await call.message.answer(f"<b>Последний план</b>\n{lines}", reply_markup=trainer_main_kb())
+    db = await ExerciseDB.load()
+    await call.message.answer(
+        format_plan_message({**st, "exercises": exs}, db),
+        reply_markup=trainer_main_kb(),
+    )
     await call.answer()
 
 
@@ -301,7 +313,7 @@ async def cb_reset(call: types.CallbackQuery, state: FSMContext):
 async def cb_start_flow(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(TrSession.check_cns)
     await call.message.answer(
-        "Как самочувствие?\nЦНС / сон — от 1 до 10:",
+        checkin_question("cns"),
         reply_markup=scale_1_10("tr_pre_cns", "tr_main"),
     )
     await call.answer()
@@ -313,41 +325,54 @@ async def cb_pre_back(call: types.CallbackQuery, state: FSMContext):
     if step == "cns":
         await state.set_state(TrSession.check_cns)
         await call.message.answer(
-            "Как самочувствие?\nЦНС / сон — от 1 до 10:",
+            checkin_question("cns"),
             reply_markup=scale_1_10("tr_pre_cns", "tr_main"),
         )
     elif step == "joint":
         await state.set_state(TrSession.check_joint)
-        await call.message.answer("Суставы сегодня — от 1 до 10?", reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"))
+        await call.message.answer(checkin_question("joint"), reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"))
     elif step == "psy":
         await state.set_state(TrSession.check_psy)
-        await call.message.answer("Настрой и мотивация — от 1 до 10?", reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"))
+        await call.message.answer(checkin_question("psy"), reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"))
     await call.answer()
 
 
 @trainer_router.callback_query(F.data.startswith("tr_pre_cns_"))
 async def cb_pre_cns(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(pre_cns=_scale_val(call.data))
+    val = _scale_val(call.data)
+    await state.update_data(pre_cns=val)
+    nudge = checkin_nudge("cns", val)
     await state.set_state(TrSession.check_joint)
-    await call.message.answer("Суставы сегодня — от 1 до 10?", reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"))
+    await call.message.answer(
+        (nudge + "\n\n" if nudge else "") + checkin_question("joint"),
+        reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"),
+    )
     await call.answer()
 
 
 @trainer_router.callback_query(F.data.startswith("tr_pre_joint_"))
 async def cb_pre_joint(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(pre_joint=_scale_val(call.data))
+    val = _scale_val(call.data)
+    await state.update_data(pre_joint=val)
+    nudge = checkin_nudge("joint", val)
     await state.set_state(TrSession.check_psy)
-    await call.message.answer("Настрой и мотивация — от 1 до 10?", reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"))
+    await call.message.answer(
+        (nudge + "\n\n" if nudge else "") + checkin_question("psy"),
+        reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"),
+    )
     await call.answer()
 
 
 @trainer_router.callback_query(F.data.startswith("tr_pre_psy_"))
 async def cb_pre_psy(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(pre_psy=_scale_val(call.data))
-    await call.message.answer(
-        "Супер. Сделай короткую разминку и жми «Начать» — зафиксирую старт.",
-        reply_markup=pre_begin_kb(),
-    )
+    val = _scale_val(call.data)
+    await state.update_data(pre_psy=val)
+    data = await state.get_data()
+    nudge = checkin_nudge("psy", val)
+    body = pre_begin_message(int(data.get("pre_cns", 5)), int(data.get("pre_joint", 5)), val)
+    if nudge:
+        body = nudge + "\n\n" + body
+    await call.message.answer(body, reply_markup=pre_begin_kb())
     await call.answer()
 
 
@@ -382,6 +407,7 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
         )
     await state.update_data(started_at=started, plan=plan, session=sess, cur_idx=0, await_baseline=False)
     await state.set_state(TrSession.in_workout)
+    await call.message.answer(session_kickoff(len(sess), plan))
     await _show_exercise(call.message, state)
     await call.answer()
 
@@ -394,17 +420,9 @@ async def _show_exercise(message: types.Message, state: FSMContext):
         await _goto_checkout(message, state)
         return
     ex = sess[idx]
-    done = len(ex["sets"])
-    tgt = int(ex.get("target_sets") or 3)
-    reps = ex.get("reps_target") or 10
-    wplan = ex.get("weight_kg_plan")
-    hint = f"ориентир {wplan:g} кг × {reps}" if wplan else f"ориентир {reps} повт."
-    text = (
-        f"Упражнение {idx+1}/{len(sess)} · подход {done+1}/{tgt}\n"
-        f"<b>{ex['name']}</b>\n"
-        f"{hint}\n"
-        "Напиши результат: <code>40×10</code> (можно сразу «40×10, 7» — вес, повторы, тяжесть)."
-    )
+    db = await ExerciseDB.load()
+    base = db.by_id.get(ex.get("exercise_id", ""))
+    text = exercise_card(ex, idx, len(sess), base)
     await message.answer(text, reply_markup=session_exercise_kb(idx))
 
 
@@ -433,10 +451,7 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
         )
     parsed = await parse_set_gemini(txt)
     if not parsed:
-        await message.answer(
-            "Это не похоже на подход. Напиши <code>60×8</code> или «60 кг 8 раз».\n"
-            "Аналоги — кнопкой «Аналоги ×3», не текстом."
-        )
+        await message.answer(parse_error_friendly())
         return
     row: Dict[str, Any] = {"weight": parsed["weight"], "reps": parsed["reps"]}
     if parsed.get("difficulty"):
@@ -444,14 +459,17 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
     ex["sets"].append(row)
     await state.update_data(session=sess, await_baseline=False)
     si = len(ex["sets"]) - 1
+    tgt = int(ex.get("target_sets") or 3)
     if row.get("difficulty"):
         await message.answer(
-            f"Записала: {parsed['weight']:g} кг × {parsed['reps']:g}, тяжесть {row['difficulty']}/10.\nСколько отдыхаем?",
+            praise_after_set(parsed["weight"], parsed["reps"], int(row["difficulty"]), si, tgt)
+            + "\n\n⏱ Сколько отдыхаем?",
             reply_markup=rest_kb("r", ex_idx=idx),
         )
         return
     await message.answer(
-        f"Записала: {parsed['weight']:g} кг × {parsed['reps']:g}.\nНасколько тяжело было (1–10)?",
+        praise_after_set(parsed["weight"], parsed["reps"], None, si, tgt)
+        + "\n\nНасколько тяжело было <b>(1–10)</b>?",
         reply_markup=scale_set_difficulty_kb(idx, si),
     )
 
@@ -466,7 +484,7 @@ async def cb_set_diff(call: types.CallbackQuery, state: FSMContext):
     if si < len(ex["sets"]):
         ex["sets"][si]["difficulty"] = diff
     await state.update_data(session=sess)
-    await call.message.answer("Сколько отдыхаем?", reply_markup=rest_kb("r", ex_idx=idx))
+    await call.message.answer("⏱ Сколько отдыхаем?", reply_markup=rest_kb("r", ex_idx=idx))
     await call.answer()
 
 
@@ -491,7 +509,7 @@ async def cb_rest(call: types.CallbackQuery, state: FSMContext):
         try:
             await call.bot.send_message(
                 chat,
-                "Приступай к следующему подходу 💪\nНапиши вес×повторы, например <code>40×10</code>.",
+                rest_ping_message(),
                 reply_markup=session_exercise_kb(idx),
             )
         except Exception:
@@ -517,7 +535,7 @@ async def cb_finish_ex(call: types.CallbackQuery, state: FSMContext):
     idx = int(call.data.split(":")[-1])
     await state.update_data(finish_ex_idx=idx, cur_idx=idx)
     await call.message.answer(
-        "Оценка тяжести всего упражнения 1–10?",
+        "💬 Как в целом прошло упражнение? Оценка тяжести <b>1–10</b>:",
         reply_markup=scale_1_10("tr_ex_diff", f"tr_back_ex:{idx}"),
     )
     await call.answer()
@@ -606,7 +624,7 @@ async def cb_pick_analog(call: types.CallbackQuery, state: FSMContext):
         await call.message.delete()
     except Exception:
         pass
-    await call.message.answer(f"Ок, теперь: <b>{picked_ex['name']}</b> 💪")
+    await call.message.answer(f"🔄 Заменила на: <b>{picked_ex['name']}</b> — поехали!")
     await _show_exercise(call.message, state)
     await call.answer()
 
@@ -631,9 +649,8 @@ async def cb_tech(call: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     ex = data["session"][idx]
     base = db.by_id.get(ex["exercise_id"])
-    tips = base.get("tips", []) if base else []
-    text = (base.get("technique", "") + "\n" + "\n".join(f"• {t}" for t in tips[:4])).strip()
-    tm = await call.message.answer(text or "Нет советов.")
+    text = format_technique_message(base) if base else "Пока нет описания в базе."
+    tm = await call.message.answer(text)
     await tm.edit_reply_markup(reply_markup=tech_close_kb(tm.message_id, idx))
     await call.answer()
 
@@ -678,7 +695,10 @@ async def cb_pick_swap(call: types.CallbackQuery, state: FSMContext):
 @trainer_router.callback_query(F.data == "tr_abort")
 async def cb_abort(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("Сессия прервана.", reply_markup=trainer_main_kb())
+    await call.message.answer(
+        "Сессия на паузе — ничего страшного 🤍\nКогда будешь готова: план → старт.",
+        reply_markup=trainer_main_kb(),
+    )
     await call.answer()
 
 
@@ -688,7 +708,7 @@ async def _goto_checkout(message: types.Message, state: FSMContext):
     sess = data.get("session") or []
     back = f"tr_back_ex:{max(0, len(sess) - 1)}" if sess else None
     await message.answer(
-        "Финиш почти! Как ЦНС после тренировки (1–10)?",
+        checkin_question("post_cns"),
         reply_markup=scale_1_10("tr_post_cns", back),
     )
 
@@ -699,7 +719,7 @@ async def cb_post_back(call: types.CallbackQuery, state: FSMContext):
     if step == "joint":
         await state.set_state(TrSession.checkout_joint)
         await call.message.answer(
-            "Суставы после тренировки (1–10)?",
+            checkin_question("post_joint"),
             reply_markup=scale_1_10("tr_post_joint", "tr_post_back:cns"),
         )
     else:
@@ -708,7 +728,7 @@ async def cb_post_back(call: types.CallbackQuery, state: FSMContext):
         sess = data.get("session") or []
         back = f"tr_back_ex:{max(0, len(sess) - 1)}" if sess else None
         await call.message.answer(
-            "Финиш почти! Как ЦНС после тренировки (1–10)?",
+            checkin_question("post_cns"),
             reply_markup=scale_1_10("tr_post_cns", back),
         )
     await call.answer()
@@ -718,7 +738,7 @@ async def cb_post_back(call: types.CallbackQuery, state: FSMContext):
 async def cb_post_cns(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(post_cns=_scale_val(call.data))
     await state.set_state(TrSession.checkout_joint)
-    await call.message.answer("Суставы после тренировки (1–10)?", reply_markup=scale_1_10("tr_post_joint", "tr_post_back:cns"))
+    await call.message.answer(checkin_question("post_joint"), reply_markup=scale_1_10("tr_post_joint", "tr_post_back:cns"))
     await call.answer()
 
 
@@ -727,7 +747,7 @@ async def cb_post_joint(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(post_joint=_scale_val(call.data))
     await state.set_state(TrSession.checkout_ctrl)
     await call.message.answer(
-        "Насколько держала контроль техники ~70% (1–10)?",
+        checkin_question("post_ctrl"),
         reply_markup=scale_1_10("tr_post_ctrl", "tr_post_back:joint"),
     )
     await call.answer()
@@ -792,9 +812,7 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
     sets_count = sum(len([s for s in ex["sets"] if not s.get("skipped")]) for ex in sess)
     skcal = estimate_session_kcal(bw, dur, sets_count, pain)
     bonus = _bonus_kcal(skcal)
-    summary = await call_gemini(
-        f"Дай ровно 3 буллета (•) краткого итога тренировки на русском. Данные: {json.dumps(fin, ensure_ascii=False)[:2000]}"
-    )
+    summary = await call_gemini(workout_finish_prompt() + json.dumps(fin, ensure_ascii=False)[:2000])
     row = [
         str(uuid.uuid4())[:12],
         now_local().strftime("%Y-%m-%d %H:%M"),
@@ -830,7 +848,10 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
         bot_nutrition,
     )
     cmp1 = await report_vs_avg_four_weeks({"exercises": fin})
-    await call.message.answer(f"{summary}\n\n{cmp1}", reply_markup=trainer_main_kb())
+    await call.message.answer(
+        f"🎉 <b>Тренировка в копилке!</b>\n\n{summary}\n\n📊 {cmp1}",
+        reply_markup=trainer_main_kb(),
+    )
     await state.clear()
     await call.answer()
 
