@@ -291,7 +291,6 @@ async def ensure_sheets() -> None:
 
 
 async def _seed_exercises_if_empty() -> None:
-    from pathlib import Path
     import json as js
 
     ws = await get_worksheet("Упражнения")
@@ -306,23 +305,38 @@ async def _seed_exercises_if_empty() -> None:
         logger.warning("exercises_seed.json missing")
         return
     items = js.loads(path.read_text(encoding="utf-8"))
-    for it in items:
-        await append_row_to_sheet(
-            "Упражнения",
-            [
-                it.get("id", ""),
-                it.get("name", ""),
-                it.get("synonyms", ""),
-                it.get("group", ""),
-                it.get("equipment", ""),
-                it.get("type", ""),
-                it.get("technique", ""),
-                it.get("tip1", ""),
-                it.get("tip2", ""),
-                it.get("tip3", ""),
-                it.get("tip4", ""),
-            ],
-        )
+    rows = [
+        [
+            it.get("id", ""),
+            it.get("name", ""),
+            it.get("synonyms", ""),
+            it.get("group", ""),
+            it.get("equipment", ""),
+            it.get("type", ""),
+            it.get("technique", ""),
+            it.get("tip1", ""),
+            it.get("tip2", ""),
+            it.get("tip3", ""),
+            it.get("tip4", ""),
+        ]
+        for it in items
+    ]
+    async with sheet_write_lock("Упражнения"):
+        try:
+            raw_w = getattr(ws, "_ws", ws)
+            if hasattr(ws, "_agcm") and hasattr(raw_w, "append_rows"):
+                await ws._agcm.execute(raw_w.append_rows, rows)
+            elif hasattr(ws, "append_rows"):
+                res = ws.append_rows(rows)
+                if asyncio.iscoroutine(res):
+                    await res
+            else:
+                for row in rows:
+                    await _append_row_unlocked("Упражнения", row)
+            invalidate_sheet_cache("Упражнения")
+            logger.info("Seeded %s exercises", len(rows))
+        except Exception as e:
+            logger.error("seed exercises: %s", e)
 
 
 async def get_sheet_rows_for_period(sheet_name: str, days: int, date_col: int = 0) -> List[List[str]]:
@@ -367,15 +381,22 @@ def _parse_row_date(raw_cell: str):
 
 
 async def get_settings_map() -> Dict[str, str]:
-    ws = await get_worksheet("Настройки")
-    if not ws:
+    async def _inner() -> Dict[str, str]:
+        ws = await get_worksheet("Настройки")
+        if not ws:
+            return {}
+        rows = await get_ws_values(ws)
+        out: Dict[str, str] = {}
+        for r in rows[1:]:
+            if len(r) >= 2 and str(r[0]).strip():
+                out[str(r[0]).strip()] = str(r[1]).strip()
+        return out
+
+    try:
+        return await asyncio.wait_for(_inner(), timeout=20)
+    except Exception as e:
+        logger.warning("get_settings_map: %s", e)
         return {}
-    rows = await get_ws_values(ws)
-    out: Dict[str, str] = {}
-    for r in rows[1:]:
-        if len(r) >= 2 and str(r[0]).strip():
-            out[str(r[0]).strip()] = str(r[1]).strip()
-    return out
 
 
 async def set_setting(key: str, value: str) -> None:

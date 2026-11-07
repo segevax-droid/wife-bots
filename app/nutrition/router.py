@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import Dict, Optional
@@ -97,10 +98,9 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
 @nutrition_router.message(Command("menu"), StateFilter(None))
 async def nut_start(message: types.Message, state: FSMContext):
     await state.clear()
-    # Always answer first — Sheets must not block Telegram reply
     await message.answer("Нутрициолог. Проверяю профиль…")
     try:
-        await record_user_chat("nutrition", message.chat.id)
+        await asyncio.wait_for(record_user_chat("nutrition", message.chat.id), timeout=15)
     except Exception:
         pass
     try:

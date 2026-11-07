@@ -54,8 +54,16 @@ async def load_state_from_sheet() -> None:
 
 
 async def save_state_pairs(pairs: Dict[str, str]) -> bool:
-    from app.sheets import append_row_to_sheet, sheet_write_lock, get_worksheet, get_ws_values, _update_sheet_cell_unlocked
+    from app.sheets import (
+        sheet_write_lock,
+        get_worksheet,
+        get_ws_values,
+        _update_sheet_cell_unlocked,
+        _append_row_unlocked,
+    )
 
+    # Must use _append_row_unlocked here: append_row_to_sheet re-acquires the same
+    # asyncio.Lock and deadlocks (Lock is not reentrant).
     async with sheet_write_lock("Состояние"):
         ws = await get_worksheet("Состояние")
         if not ws:
@@ -72,10 +80,12 @@ async def save_state_pairs(pairs: Dict[str, str]) -> bool:
                 if not await _update_sheet_cell_unlocked("Состояние", row_idx, 2, value):
                     ok = False
             else:
-                w_ok, err = await append_row_to_sheet("Состояние", [key, value])
+                w_ok, err = await _append_row_unlocked("Состояние", [key, value])
                 if not w_ok:
                     ok = False
                     logger.error("state append %s: %s", key, err)
+                else:
+                    index[key] = len(index) + 2  # best-effort; cache invalidated on append
         for k, v in pairs.items():
             SYSTEM_STATE[k] = v
         return ok

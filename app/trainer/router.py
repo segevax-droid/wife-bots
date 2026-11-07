@@ -74,7 +74,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Тренер. Меню:", reply_markup=trainer_main_kb())
     try:
-        await record_user_chat("trainer", message.chat.id)
+        await asyncio.wait_for(record_user_chat("trainer", message.chat.id), timeout=15)
     except Exception:
         pass
 
