@@ -126,7 +126,7 @@ class ExerciseDB:
                     continue
                 if other.get("type") == t:
                     pool.append(other)
-        return pool[: max(20, limit * 6)]
+        return pool[: max(limit, 30)]
 
     def real_named(self) -> List[Dict[str, Any]]:
         """Prefer exercises that look like real names, not 'Группа — упражнение N'."""
