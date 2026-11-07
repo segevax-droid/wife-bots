@@ -130,7 +130,8 @@ async def _save_plan(message: types.Message, plan: dict) -> None:
     await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
     n = len(st.get("exercises", []))
     names = ", ".join(e["name"] for e in st.get("exercises", [])[:8])
-    await message.answer(f"План готов: {n} упражнений.\n{names}", reply_markup=trainer_main_kb())
+    extra = ("\n" + plan["note"]) if plan.get("note") else ""
+    await message.answer(f"План готов: {n} упражнений.{extra}\n{names}", reply_markup=trainer_main_kb())
 
 
 async def _ingest_plan_msg(message: types.Message):

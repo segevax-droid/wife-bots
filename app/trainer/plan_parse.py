@@ -67,24 +67,60 @@ async def parse_workout_plan(text: str, db: ExerciseDB) -> Dict[str, Any]:
     return {"exercises": _map_exercises(data, db)}
 
 
+def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
+    by_g: Dict[str, list] = {}
+    for ex in db.by_id.values():
+        by_g.setdefault(ex.get("group") or "Прочее", []).append(ex)
+    picked = []
+    for g in ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор"):
+        if by_g.get(g):
+            picked.append(by_g[g][0])
+        if len(picked) >= 6:
+            break
+    if len(picked) < 5:
+        for ex in db.by_id.values():
+            if ex not in picked:
+                picked.append(ex)
+            if len(picked) >= 6:
+                break
+    return {
+        "exercises": [
+            {
+                "exercise_id": e["id"],
+                "name": e["name"],
+                "original": e["name"],
+                "sets": 3,
+                "reps_target": 10,
+                "weight_kg": None,
+            }
+            for e in picked[:8]
+        ]
+    }
+
+
 async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any]:
     """AI builds a full-body plan; names must come from the provided catalog only."""
     catalog = []
-    for ex in list(db.by_id.values())[:80]:
+    for ex in list(db.by_id.values())[:40]:
         catalog.append({"id": ex["id"], "name": ex["name"], "group": ex.get("group", "")})
-    prompt = f'''Ты тренер. Составь план на 1 тренировку (5–8 упражнений) из каталога.
-Выбирай только name из каталога. Только JSON без markdown:
-{{"exercises":[{{"name":"...","sets":3,"reps_target":10,"weight_kg":null}}]}}
-Подсказка пользователя: {hint or "общее развитие силы, без травм"}
-Каталог: {json.dumps(catalog, ensure_ascii=False)[:6000]}
-'''
+    prompt = (
+        "Ты тренер. Составь план на 1 тренировку (5–8 упражнений) из каталога. "
+        "Только JSON без markdown: "
+        '{"exercises":[{"name":"...","sets":3,"reps_target":10,"weight_kg":null}]}. '
+        f"Подсказка: {hint or 'общее развитие силы'}. "
+        f"Каталог: {json.dumps(catalog, ensure_ascii=False)[:3500]}"
+    )
     raw = await call_gemini(prompt)
-    if raw.startswith("⚠️") or raw.startswith("⏳"):
-        return {"exercises": [], "error": raw}
-    data = _parse_json_obj(raw)
-    if not data:
-        return {"exercises": [], "error": "parse"}
-    return {"exercises": _map_exercises(data, db)}
+    if not (raw.startswith("⚠️") or raw.startswith("⏳")):
+        data = _parse_json_obj(raw)
+        mapped = _map_exercises(data, db) if data else []
+        if mapped:
+            return {"exercises": mapped}
+    local = _local_fullbody_plan(db)
+    if local["exercises"]:
+        local["note"] = "Gemini недоступен — собран базовый план из базы упражнений."
+        return local
+    return {"exercises": [], "error": raw if raw.startswith("⚠️") else "пустой каталог упражнений"}
 
 
 def plan_to_state(plan: Dict[str, Any]) -> Dict[str, Any]:

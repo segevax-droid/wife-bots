@@ -33,11 +33,18 @@ async def gemini_raw_request(payload: dict) -> Tuple[int, dict, str]:
         if m and m not in seen:
             seen.append(m)
             models.append(m)
-    async with ClientSession(timeout=ClientTimeout(total=45)) as session:
+    timeout = ClientTimeout(total=25, sock_connect=10)
+    async with ClientSession(timeout=timeout) as session:
         for model in models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={WIFE_GEMINI_API_KEY}"
-            async with session.post(url, headers=headers, json=payload) as resp:
-                last_status, last_raw = resp.status, await resp.text()
+            try:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    last_status, last_raw = resp.status, await resp.text()
+            except Exception as e:
+                logger.warning("gemini %s network: %s", model, e)
+                last_status, last_raw = 0, str(e)
+                continue
+            logger.info("gemini %s -> %s", model, last_status)
             if last_status == 200:
                 GEMINI_MODEL = model
                 try:
@@ -47,7 +54,7 @@ async def gemini_raw_request(payload: dict) -> Tuple[int, dict, str]:
             if last_status not in (404, 400, 503):
                 break
     try:
-        return last_status, json.loads(last_raw), last_raw
+        return last_status, json.loads(last_raw) if last_raw.startswith("{") else {}, last_raw
     except Exception:
         return last_status, {}, last_raw
 
@@ -74,7 +81,7 @@ async def ping_gemini_quota() -> str:
             return f"OK. Модель: {GEMINI_MODEL}. Задержка: {lat}s"
         return _gemini_error_hint(status, raw)
     except Exception as e:
-        return f"Сеть: {str(e)[:60]}"
+        return f"Сеть: {type(e).__name__}: {str(e)[:80]}"
 
 
 async def call_gemini(prompt: str, media_b64: Optional[str] = None, mime_type: Optional[str] = None) -> str:
@@ -92,7 +99,7 @@ async def call_gemini(prompt: str, media_b64: Optional[str] = None, mime_type: O
             return cands[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
         return "⚠️ Пустой ответ."
     except Exception as e:
-        return f"⚠️ Сеть: {str(e)[:80]}"
+        return f"⚠️ Сеть: {type(e).__name__}: {str(e)[:80]}"
 
 
 async def download_file_as_base64(bot: Bot, file_id: str) -> Optional[str]:
