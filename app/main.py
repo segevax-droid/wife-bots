@@ -119,11 +119,17 @@ def create_app() -> web.Application:
 
 
 def main():
-    if WIFE_USE_POLLING or not WIFE_RENDER_EXTERNAL_URL:
-        asyncio.run(run_polling())
-    else:
+    # On Render always bind HTTP when public URL is set (webhook). Polling has no open port.
+    if WIFE_RENDER_EXTERNAL_URL and not WIFE_USE_POLLING:
+        logger.info("Webhook mode on 0.0.0.0:%s url=%s", PORT, WIFE_RENDER_EXTERNAL_URL)
         app = create_app()
         web.run_app(app, host="0.0.0.0", port=PORT)
+        return
+    if WIFE_USE_POLLING:
+        logger.info("Polling mode (dev)")
+    else:
+        logger.info("No WIFE_RENDER_EXTERNAL_URL — polling fallback")
+    asyncio.run(run_polling())
 
 
 if __name__ == "__main__":
