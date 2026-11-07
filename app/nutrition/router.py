@@ -31,12 +31,9 @@ class NutOnboard(StatesGroup):
 def _main_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="Копилка дня", callback_data="nut_bank")],
-        [InlineKeyboardButton(text="Покупки ~4 дня", callback_data="nut_shop")],
-        [InlineKeyboardButton(text="Повторить онбординг", callback_data="nut_onboard")],
-        [
-            InlineKeyboardButton(text="Gemini квота", callback_data="check_gemini_quota"),
-            InlineKeyboardButton(text="TTS", callback_data="tts_speak_msg"),
-        ],
+        [InlineKeyboardButton(text="Список покупок", callback_data="nut_shop")],
+        [InlineKeyboardButton(text="Заново заполнить профиль", callback_data="nut_onboard")],
+        [InlineKeyboardButton(text="Проверить Gemini", callback_data="check_gemini_quota")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -91,30 +88,35 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
         await message.answer("Низкая уверенность. Проверь: " + json.dumps(m, ensure_ascii=False))
         return
     await log_meal_row(staple, grams, m)
-    await message.answer(f"Записано: {staple} {grams:.0f}г (~{m['kcal'] * grams / 100:.0f} ккал).")
+    kcal = m["kcal"] * grams / 100
+    await message.answer(
+        f"<b>Записано</b>\n{staple} — {grams:.0f} г\n≈ {kcal:.0f} ккал "
+        f"(Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})"
+    )
 
 
 @nutrition_router.message(Command("start"))
 @nutrition_router.message(Command("menu"))
 async def nut_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Нутрициолог. Проверяю профиль…")
-    try:
-        await asyncio.wait_for(record_user_chat("nutrition", message.chat.id), timeout=15)
-    except Exception:
-        pass
-    try:
-        s = await get_settings_map()
-    except Exception:
-        s = {}
+    await record_user_chat("nutrition", message.chat.id)
+    s = await get_settings_map()
     if not _profile_base_ok(s):
         await state.set_state(NutOnboard.height)
-        await message.answer("Онбординг: рост в см одним числом.")
+        await message.answer(
+            "<b>Профиль</b>\nНапиши рост в сантиметрах одним числом.\nПример: <code>165</code>"
+        )
         return
     if not str(s.get("weight_kg", "")).strip():
-        await message.answer("Пришли текущий вес кг одним числом.")
+        await message.answer("Напиши вес в кг одним числом.\nПример: <code>90</code>")
         return
-    await message.answer("Меню:", reply_markup=_main_kb())
+    await message.answer(
+        "<b>Нутрициолог</b>\n"
+        "• Еда — текстом, голосом или фото («овсянка 200г»)\n"
+        "• Вес — одним числом, например <code>90</code>\n"
+        "• Копилка — сколько уже съела за день",
+        reply_markup=_main_kb(),
+    )
 
 
 @nutrition_router.message(NutOnboard.height, F.text)
@@ -239,21 +241,23 @@ async def cb_bank(call: types.CallbackQuery):
         await call.answer("Нет профиля", show_alert=True)
         return
     p, f_, c, k = await today_intake()
-    lines = [
-        f"Ккал [{progress_bar(k, tgt['kcal'])}] {k:.0f}/{tgt['kcal']:.0f}",
-        f"Б   [{progress_bar(p, tgt['p'])}] {p:.0f}/{tgt['p']:.0f}",
-        f"Ж   [{progress_bar(f_, tgt['f'])}] {f_:.0f}/{tgt['f']:.0f}",
-        f"У   [{progress_bar(c, tgt['c'])}] {c:.0f}/{tgt['c']:.0f}",
-    ]
-    await call.message.answer("\n".join(lines))
+    text = (
+        f"<b>Копилка дня</b>\n"
+        f"Калории  {progress_bar(k, tgt['kcal'])}  {k:.0f} / {tgt['kcal']:.0f}\n"
+        f"Белки    {progress_bar(p, tgt['p'])}  {p:.0f} / {tgt['p']:.0f} г\n"
+        f"Жиры     {progress_bar(f_, tgt['f'])}  {f_:.0f} / {tgt['f']:.0f} г\n"
+        f"Углеводы {progress_bar(c, tgt['c'])}  {c:.0f} / {tgt['c']:.0f} г"
+    )
+    await call.message.answer(text)
     await call.answer()
 
 
 @nutrition_router.callback_query(F.data == "nut_shop")
 async def cb_shop(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.answer("Составляю список покупок…")
     rows = await get_sheet_rows_for_period("Питание", 4, date_col=0)
     sample = "\n".join([str(r[2]) for r in rows[-12:] if len(r) > 2])
     s = await get_settings_map()
     prompt = f"Список покупок на ~4 дня, кратко маркированный. Цель: {s.get('goal')}. Недавние приёмы:\n{sample}"
     await call.message.answer(await call_gemini(prompt))
-    await call.answer()

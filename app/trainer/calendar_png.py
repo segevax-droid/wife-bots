@@ -8,22 +8,27 @@ from PIL import Image, ImageDraw, ImageFont
 from app.state import now_local
 
 
+def _font(size: int):
+    for name in ("DejaVuSans.ttf", "arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
 async def month_png_bytes(year: int, month: int, session_by_day: Dict[int, float]) -> bytes:
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdayscalendar(year, month)
-    w, h = 900, 700
+    w, h = 900, 720
     img = Image.new("RGB", (w, h), "white")
     draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 18)
-        font_b = ImageFont.truetype("arial.ttf", 22)
-    except Exception:
-        font = ImageFont.load_default()
-        font_b = font
+    font = _font(16)
+    font_b = _font(22)
 
-    title = f"{month:02d}.{year} тренировки"
+    title = f"{month:02d}.{year} workouts"
     draw.text((20, 16), title, fill="black", font=font_b)
-    headers = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    headers = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     cell_w, cell_h = 120, 90
     ox, oy = 20, 60
     for i, hd in enumerate(headers):
@@ -36,9 +41,10 @@ async def month_png_bytes(year: int, month: int, session_by_day: Dict[int, float
             if day == 0:
                 continue
             tons = session_by_day.get(day, 0.0)
-            mark = "☑" if tons > 0 else "☐"
-            draw.text((x + 8, y + 6), f"{day} {mark}", fill="black", font=font)
-            draw.text((x + 8, y + 36), f"{tons:.0f} кг×п", fill="#555", font=font)
+            mark = "[x]" if tons > 0 else "[ ]"
+            fill = "#0a7" if tons > 0 else "black"
+            draw.text((x + 8, y + 6), f"{day} {mark}", fill=fill, font=font)
+            draw.text((x + 8, y + 36), f"{tons:.0f} kg", fill="#555", font=font)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -52,7 +58,7 @@ async def current_month_tonnage_map() -> Dict[int, float]:
     y, m = now_local().year, now_local().month
     out: Dict[int, float] = {}
     for r in rows:
-        if len(r) < 15:
+        if len(r) < 16:
             continue
         ds = str(r[1])
         try:

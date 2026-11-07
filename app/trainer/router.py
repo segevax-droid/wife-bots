@@ -13,7 +13,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 
 from app.common import record_user_chat, send_cross_notification
 from app.config import BONUS_CARB_FRAC
-from app.gemini import call_gemini, download_file_as_base64, ping_gemini_quota, transcribe_voice_message
+from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.sheets import append_row_to_sheet, get_settings_map, get_worksheet, get_ws_values
 from app.state import SYSTEM_STATE, now_local, save_state_pairs
 from app.trainer.calendar_png import current_month_tonnage_map, month_png_bytes
@@ -72,11 +72,15 @@ def _scale_val(data: str) -> int:
 @trainer_router.message(Command("menu"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Тренер. Меню:", reply_markup=trainer_main_kb())
-    try:
-        await asyncio.wait_for(record_user_chat("trainer", message.chat.id), timeout=15)
-    except Exception:
-        pass
+    await message.answer(
+        "<b>Тренер</b>\n"
+        "• План — собрать тренировку\n"
+        "• Старт — чек-ин и подходы\n"
+        "• Отчёты и календарь — прогресс\n"
+        "• Проверить Gemini — связь с ИИ",
+        reply_markup=trainer_main_kb(),
+    )
+    await record_user_chat("trainer", message.chat.id)
 
 
 @trainer_router.callback_query(F.data == "tr_main")
@@ -84,11 +88,6 @@ async def cb_main(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.answer("Меню:", reply_markup=trainer_main_kb())
     await call.answer()
-
-
-@trainer_router.callback_query(F.data == "tr_diag")
-async def cb_diag(call: types.CallbackQuery):
-    await call.answer(await ping_gemini_quota(), show_alert=True)
 
 
 @trainer_router.callback_query(F.data == "tr_plan_menu")
@@ -130,8 +129,12 @@ async def _save_plan(message: types.Message, plan: dict) -> None:
     await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
     n = len(st.get("exercises", []))
     names = ", ".join(e["name"] for e in st.get("exercises", [])[:8])
-    extra = ("\n" + plan["note"]) if plan.get("note") else ""
-    await message.answer(f"План готов: {n} упражнений.{extra}\n{names}", reply_markup=trainer_main_kb())
+    extra = ("\n<i>" + plan["note"] + "</i>") if plan.get("note") else ""
+    lines = "\n".join(f"• {e['name']} — {e['sets']}×{e['reps_target']}" for e in st.get("exercises", []))
+    await message.answer(
+        f"<b>План готов</b> ({n} упражнений){extra}\n{lines}",
+        reply_markup=trainer_main_kb(),
+    )
 
 
 async def _ingest_plan_msg(message: types.Message):
@@ -152,8 +155,17 @@ async def _ingest_plan_msg(message: types.Message):
 
 @trainer_router.callback_query(F.data == "tr_last_plan")
 async def cb_last_plan(call: types.CallbackQuery):
-    raw = SYSTEM_STATE.get("plan_last_json") or "{}"
-    await call.message.answer(f"Последний план JSON:\n{raw[:3500]}", reply_markup=trainer_main_kb())
+    try:
+        st = json.loads(SYSTEM_STATE.get("plan_last_json") or "{}")
+    except Exception:
+        st = {}
+    exs = st.get("exercises") or []
+    if not exs:
+        await call.message.answer("Сохранённого плана нет. Нажми «План тренировки».", reply_markup=trainer_main_kb())
+        await call.answer()
+        return
+    lines = "\n".join(f"• {e.get('name')} — {e.get('sets')}×{e.get('reps_target')}" for e in exs)
+    await call.message.answer(f"<b>Последний план</b>\n{lines}", reply_markup=trainer_main_kb())
     await call.answer()
 
 

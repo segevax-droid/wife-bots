@@ -4,22 +4,18 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 def trainer_main_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="Старт тренировки", callback_data="tr_start_flow")],
-        [InlineKeyboardButton(text="План ↗", callback_data="tr_plan_menu")],
+        [InlineKeyboardButton(text="План тренировки", callback_data="tr_plan_menu")],
         [
             InlineKeyboardButton(text="Отчёт день", callback_data="tr_rep_d"),
-            InlineKeyboardButton(text="Отчёт нед", callback_data="tr_rep_w"),
+            InlineKeyboardButton(text="Отчёт неделя", callback_data="tr_rep_w"),
         ],
         [
-            InlineKeyboardButton(text="Отчёт мес", callback_data="tr_rep_m"),
-            InlineKeyboardButton(text="Календарь PNG", callback_data="tr_cal_png"),
+            InlineKeyboardButton(text="Отчёт месяц", callback_data="tr_rep_m"),
+            InlineKeyboardButton(text="Календарь", callback_data="tr_cal_png"),
         ],
         [
-            InlineKeyboardButton(text="Диагностика", callback_data="tr_diag"),
+            InlineKeyboardButton(text="Проверить Gemini", callback_data="check_gemini_quota"),
             InlineKeyboardButton(text="Сброс сессии", callback_data="tr_reset_session"),
-        ],
-        [
-            InlineKeyboardButton(text="Gemini квота", callback_data="check_gemini_quota"),
-            InlineKeyboardButton(text="TTS", callback_data="tts_speak_msg"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -68,15 +64,15 @@ def session_exercise_kb(ex_idx: int) -> InlineKeyboardMarkup:
 
 
 def scale_1_10(prefix: str) -> InlineKeyboardMarkup:
-    row = [InlineKeyboardButton(text=str(i), callback_data=f"{prefix}_{i}") for i in range(1, 11)]
-    return InlineKeyboardMarkup(inline_keyboard=[row])
+    r1 = [InlineKeyboardButton(text=str(i), callback_data=f"{prefix}_{i}") for i in range(1, 6)]
+    r2 = [InlineKeyboardButton(text=str(i), callback_data=f"{prefix}_{i}") for i in range(6, 11)]
+    return InlineKeyboardMarkup(inline_keyboard=[r1, r2])
 
 
 def scale_set_difficulty_kb(ex_idx: int, set_i: int) -> InlineKeyboardMarkup:
-    row = [
-        InlineKeyboardButton(text=str(i), callback_data=f"trsd:{ex_idx}:{set_i}:{i}") for i in range(1, 11)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[row])
+    r1 = [InlineKeyboardButton(text=str(i), callback_data=f"trsd:{ex_idx}:{set_i}:{i}") for i in range(1, 6)]
+    r2 = [InlineKeyboardButton(text=str(i), callback_data=f"trsd:{ex_idx}:{set_i}:{i}") for i in range(6, 11)]
+    return InlineKeyboardMarkup(inline_keyboard=[r1, r2])
 
 
 def tech_close_kb(mid: int) -> InlineKeyboardMarkup:

@@ -119,6 +119,11 @@ async def resolve_staple_macros(staple: str) -> Tuple[Dict[str, Any], float, str
     if hit and sanity(hit):
         return hit, hit.get("conf", 0.9), "cache"
     off = await off_search(staple)
+    if off and all(off.get(x) is not None for x in ("kcal", "p", "f", "c")):
+        data = {"kcal": float(off["kcal"]), "p": float(off["p"]), "f": float(off["f"]), "c": float(off["c"]), "confidence": 0.85}
+        if sanity(data):
+            await cache_store(k, data, "off")
+            return data, 0.85, "off"
     data, conf = await gemini_macros(staple, off)
     if off:
         for kk, vv in {"kcal": off.get("kcal"), "p": off.get("p"), "f": off.get("f"), "c": off.get("c")}.items():
@@ -129,8 +134,22 @@ async def resolve_staple_macros(staple: str) -> Tuple[Dict[str, Any], float, str
     return data, conf, "off+gemini"
 
 
+def parse_meal_local(text: str) -> Optional[Tuple[str, float]]:
+    s = (text or "").strip()
+    m = re.search(r"^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|g)\b", s, re.I)
+    if m:
+        return m.group(1).strip(), float(m.group(2).replace(",", "."))
+    m = re.search(r"^(\d+(?:[.,]\d+)?)\s*(?:г|гр|g)\s+(.+)$", s, re.I)
+    if m:
+        return m.group(2).strip(), float(m.group(1).replace(",", "."))
+    return None
+
+
 async def parse_meal_grams(text: str) -> Tuple[str, float]:
-    prompt = f"Извлеки staple (продукт) и массу в граммах из фразы. JSON: {{\"staple\":\"\",\"grams\":число}}. Фраза: {text}"
+    local = parse_meal_local(text)
+    if local:
+        return local
+    prompt = f'Извлеки продукт и массу в граммах. JSON: {{"staple":"","grams":число}}. Фраза: {text}'
     raw = await call_gemini(prompt)
     m = re.search(r"\{[\s\S]*\}", raw)
     if not m:

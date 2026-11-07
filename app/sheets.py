@@ -24,6 +24,7 @@ _CREDS_LOCK = threading.Lock()
 _SHEET_VALUES: Dict[str, Tuple[int, float, List[List[str]]]] = {}
 _SHEET_GEN: Dict[str, int] = {}
 SHEET_READ_TTL = 45
+_SETTINGS_CACHE: Optional[Dict[str, str]] = None
 
 
 def get_credentials() -> Credentials:
@@ -381,6 +382,10 @@ def _parse_row_date(raw_cell: str):
 
 
 async def get_settings_map() -> Dict[str, str]:
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is not None:
+        return dict(_SETTINGS_CACHE)
+
     async def _inner() -> Dict[str, str]:
         ws = await get_worksheet("Настройки")
         if not ws:
@@ -393,13 +398,19 @@ async def get_settings_map() -> Dict[str, str]:
         return out
 
     try:
-        return await asyncio.wait_for(_inner(), timeout=20)
+        out = await asyncio.wait_for(_inner(), timeout=12)
+        _SETTINGS_CACHE = dict(out)
+        return out
     except Exception as e:
         logger.warning("get_settings_map: %s", e)
-        return {}
+        return dict(_SETTINGS_CACHE or {})
 
 
 async def set_setting(key: str, value: str) -> None:
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is None:
+        _SETTINGS_CACHE = {}
+    _SETTINGS_CACHE[key] = value
     ws = await get_worksheet("Настройки")
     if not ws:
         return

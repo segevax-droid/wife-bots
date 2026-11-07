@@ -112,9 +112,16 @@ async def recalc_norms_for_user(settings: Dict[str, str], reason: str = "", cons
     await save_state_pairs({"last_norms_weight": f"{w:.1f}"})
 
     return (
-        f"BMR≈{bmr:.0f}, TDEE≈{tdee:.0f}, дефицит≈{deficit_pct*100:.0f}% (−{deficit_abs:.0f} ккал), "
-        f"цель≈{total_kcal:.0f} ккал (база {base_kcal:.0f}+{bonus:.0f} бонус).\n"
-        f"БЖУ: Б≈{protein:.0f}г, Ж≈{fat:.0f}г, У≈{carbs_g:.0f}г.{notify}"
+        f"<b>Нормы на сегодня</b>\n"
+        f"Базовый обмен (BMR): {bmr:.0f} ккал\n"
+        f"С учётом активности (TDEE): {tdee:.0f} ккал\n"
+        f"Дефицит: {deficit_pct*100:.0f}% (−{deficit_abs:.0f} ккал)\n"
+        f"Цель: <b>{total_kcal:.0f} ккал</b>"
+        f"{f' +{bonus:.0f} бонус от тренировки' if bonus else ''}\n\n"
+        f"Белки: {protein:.0f} г\n"
+        f"Жиры: {fat:.0f} г\n"
+        f"Углеводы: {carbs_g:.0f} г"
+        f"{notify}"
     )
 
 

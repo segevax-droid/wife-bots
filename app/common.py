@@ -1,10 +1,10 @@
+import asyncio
 import logging
 
 from aiogram import Bot, F, Router, types
-from aiogram.types import BufferedInputFile
 
 from app.config import WIFE_ALLOWED_CHAT_IDS
-from app.gemini import ping_gemini_quota, text_to_speech_bytes
+from app.gemini import ping_gemini_quota
 from app.state import SYSTEM_STATE, save_state_pairs
 
 logger = logging.getLogger("wife_bots")
@@ -36,23 +36,14 @@ async def record_user_chat(role: str, chat_id: int) -> None:
     key = "chat_Trainer" if role == "trainer" else "chat_Nutrition"
     if SYSTEM_STATE.get(key) == chat_id:
         return
-    await save_state_pairs({key: str(chat_id)})
+    SYSTEM_STATE[key] = chat_id
+    asyncio.create_task(save_state_pairs({key: str(chat_id)}))
 
 
 @common_router.callback_query(F.data == "check_gemini_quota")
 async def cb_check_gemini_quota(call: types.CallbackQuery):
-    await call.answer(await ping_gemini_quota(), show_alert=True)
-
-
-@common_router.callback_query(F.data == "tts_speak_msg")
-async def cb_tts_speak_msg(call: types.CallbackQuery):
-    await call.answer("Озвучиваю…")
-    raw = call.message.text or call.message.caption or ""
-    audio_b = await text_to_speech_bytes(raw)
-    if audio_b:
-        await call.message.answer_voice(voice=BufferedInputFile(audio_b, filename="voice.mp3"))
-    else:
-        await call.message.answer("TTS недоступен для этой модели.")
+    await call.answer("Проверяю Gemini…")
+    await call.message.answer(await ping_gemini_quota())
 
 
 def register_acl(dp):

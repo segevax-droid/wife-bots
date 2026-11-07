@@ -72,13 +72,13 @@ def _gemini_error_hint(status: int, raw: str) -> str:
 
 async def ping_gemini_quota() -> str:
     if not WIFE_GEMINI_API_KEY:
-        return "WIFE_GEMINI_API_KEY пуст на сервере."
+        return "Ключ Gemini не задан (WIFE_GEMINI_API_KEY)."
     t0 = asyncio.get_event_loop().time()
     try:
-        status, _, raw = await gemini_raw_request({"contents": [{"parts": [{"text": "ping"}]}]})
+        status, _, raw = await gemini_raw_request({"contents": [{"parts": [{"text": "ok"}]}]})
         lat = round(asyncio.get_event_loop().time() - t0, 2)
         if status == 200:
-            return f"OK. Модель: {GEMINI_MODEL}. Задержка: {lat}s"
+            return f"Gemini работает.\nМодель: {GEMINI_MODEL}\nЗадержка: {lat}s"
         return _gemini_error_hint(status, raw)
     except Exception as e:
         return f"Сеть: {type(e).__name__}: {str(e)[:80]}"
