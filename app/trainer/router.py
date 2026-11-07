@@ -72,8 +72,11 @@ def _scale_val(data: str) -> int:
 @trainer_router.message(Command("menu"), StateFilter(None))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await record_user_chat("trainer", message.chat.id)
     await message.answer("Тренер. Меню:", reply_markup=trainer_main_kb())
+    try:
+        await record_user_chat("trainer", message.chat.id)
+    except Exception:
+        pass
 
 
 @trainer_router.callback_query(F.data == "tr_main")

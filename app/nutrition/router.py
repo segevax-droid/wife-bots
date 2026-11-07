@@ -97,8 +97,14 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
 @nutrition_router.message(Command("menu"), StateFilter(None))
 async def nut_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await record_user_chat("nutrition", message.chat.id)
-    s = await get_settings_map()
+    try:
+        await record_user_chat("nutrition", message.chat.id)
+    except Exception:
+        pass
+    try:
+        s = await get_settings_map()
+    except Exception:
+        s = {}
     if not _profile_base_ok(s):
         await state.set_state(NutOnboard.height)
         await message.answer("Онбординг: рост в см одним числом.")

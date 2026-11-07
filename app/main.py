@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
+from app.bot_filters import IsBotToken
 from app.common import common_router, register_acl
 from app.config import (
     PORT,
@@ -48,6 +49,11 @@ def build_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
     dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp["bot_trainer"] = bot_trainer
     dp["bot_nutrition"] = bot_nutrition
+    # One Dispatcher serves both bots — scope each router to its token
+    trainer_router.message.filter(IsBotToken(WIFE_TRAINER_TOKEN))
+    trainer_router.callback_query.filter(IsBotToken(WIFE_TRAINER_TOKEN))
+    nutrition_router.message.filter(IsBotToken(WIFE_NUTRITION_TOKEN))
+    nutrition_router.callback_query.filter(IsBotToken(WIFE_NUTRITION_TOKEN))
     dp.include_router(common_router)
     dp.include_router(trainer_router)
     dp.include_router(nutrition_router)
@@ -91,25 +97,37 @@ def create_app() -> web.Application:
     async def health(_):
         return web.Response(text="ok")
 
+    app.router.add_get("/", health)
     app.router.add_get("/health", health)
 
     setup_application(app, dp, bot=bot_trainer)
 
     base = WIFE_RENDER_EXTERNAL_URL.rstrip("/")
 
+    async def _boot_background():
+        try:
+            await load_state_from_sheet()
+            await ensure_sheets()
+            wh_kw = {}
+            if secret:
+                wh_kw["secret_token"] = secret
+            await bot_trainer.set_webhook(f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw)
+            await bot_nutrition.set_webhook(f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw)
+            logger.info("Webhooks set: %s/webhook/trainer|nutrition", base)
+            asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
+        except Exception as e:
+            logger.exception("startup boot failed: %s", e)
+
     async def _startup(_):
-        await load_state_from_sheet()
-        await ensure_sheets()
-        wh_kw = {}
-        if secret:
-            wh_kw["secret_token"] = secret
-        await bot_trainer.set_webhook(f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw)
-        await bot_nutrition.set_webhook(f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw)
-        asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
+        # Bind port first; sheets + setWebhook in background so Render sees an open port.
+        asyncio.create_task(_boot_background())
 
     async def _cleanup(_):
-        await bot_trainer.delete_webhook(drop_pending_updates=False)
-        await bot_nutrition.delete_webhook(drop_pending_updates=False)
+        try:
+            await bot_trainer.delete_webhook(drop_pending_updates=False)
+            await bot_nutrition.delete_webhook(drop_pending_updates=False)
+        except Exception:
+            pass
         await bot_trainer.session.close()
         await bot_nutrition.session.close()
 

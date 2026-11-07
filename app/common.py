@@ -60,8 +60,14 @@ def register_acl(dp):
 
     class ACLMiddleware(BaseMiddleware):
         async def __call__(self, handler, event, data):
+            uid = None
             chat = getattr(event, "chat", None)
-            uid = getattr(chat, "id", None) if chat else None
+            if chat is not None:
+                uid = getattr(chat, "id", None)
+            if uid is None and isinstance(event, types.CallbackQuery) and event.message:
+                uid = event.message.chat.id
+            if uid is None and hasattr(event, "from_user") and event.from_user:
+                uid = event.from_user.id
             if uid is not None and not is_allowed_chat(uid):
                 if isinstance(event, types.CallbackQuery):
                     await event.answer("Нет доступа.", show_alert=True)
