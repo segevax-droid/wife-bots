@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import gspread_asyncio
@@ -18,7 +19,7 @@ _GS_SPREADSHEET = None
 _GS_LOCK = asyncio.Lock()
 _WS_CACHE: Dict[str, Any] = {}
 _SHARED_CREDS: Optional[Credentials] = None
-_CREDS_LOCK = asyncio.Lock()
+_CREDS_LOCK = threading.Lock()
 
 _SHEET_VALUES: Dict[str, Tuple[int, float, List[List[str]]]] = {}
 _SHEET_GEN: Dict[str, int] = {}
