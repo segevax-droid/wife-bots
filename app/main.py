@@ -11,7 +11,7 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from app.common import common_router, register_acl
+from app.common import make_common_router, register_acl
 from app.config import (
     PORT,
     WIFE_ALLOWED_CHAT_IDS,
@@ -71,7 +71,7 @@ def build_trainer_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher
     dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp["bot_trainer"] = bot_trainer
     dp["bot_nutrition"] = bot_nutrition
-    dp.include_router(common_router)
+    dp.include_router(make_common_router())
     dp.include_router(trainer_router)
     return dp
 
@@ -84,7 +84,7 @@ def build_nutrition_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatch
     dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp["bot_trainer"] = bot_trainer
     dp["bot_nutrition"] = bot_nutrition
-    dp.include_router(common_router)
+    dp.include_router(make_common_router())
     dp.include_router(nutrition_router)
     return dp
 

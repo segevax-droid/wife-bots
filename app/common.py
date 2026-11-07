@@ -9,9 +9,6 @@ from app.state import SYSTEM_STATE, save_state_pairs
 
 logger = logging.getLogger("wife_bots")
 
-common_router = Router(name="common")
-
-
 def is_allowed_chat(chat_id: int) -> bool:
     if not WIFE_ALLOWED_CHAT_IDS:
         return True
@@ -40,10 +37,16 @@ async def record_user_chat(role: str, chat_id: int) -> None:
     asyncio.create_task(save_state_pairs({key: str(chat_id)}))
 
 
-@common_router.callback_query(F.data == "check_gemini_quota")
-async def cb_check_gemini_quota(call: types.CallbackQuery):
-    await call.answer("Проверяю Gemini…")
-    await call.message.answer(await ping_gemini_quota())
+def make_common_router() -> Router:
+    """Fresh router instance — aiogram forbids attaching one Router to two Dispatchers."""
+    r = Router(name="common")
+
+    @r.callback_query(F.data == "check_gemini_quota")
+    async def cb_check_gemini_quota(call: types.CallbackQuery):
+        await call.answer("Проверяю Gemini…")
+        await call.message.answer(await ping_gemini_quota())
+
+    return r
 
 
 def register_acl(dp):
