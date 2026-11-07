@@ -28,14 +28,52 @@ class NutOnboard(StatesGroup):
     goal = State()
 
 
+class NutWeigh(StatesGroup):
+    waiting = State()
+
+
 def _main_kb() -> InlineKeyboardMarkup:
     rows = [
+        [InlineKeyboardButton(text="Записать вес", callback_data="nut_weigh")],
         [InlineKeyboardButton(text="Копилка дня", callback_data="nut_bank")],
         [InlineKeyboardButton(text="Список покупок", callback_data="nut_shop")],
         [InlineKeyboardButton(text="Заново заполнить профиль", callback_data="nut_onboard")],
         [InlineKeyboardButton(text="Проверить Gemini", callback_data="check_gemini_quota")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _extract_weight_kg(text: str) -> Optional[float]:
+    s = (text or "").strip().replace(",", ".")
+    if re.fullmatch(r"\d{2,3}(?:\.\d)?", s):
+        return float(s)
+    m = re.search(
+        r"(?:вес|масса(?:\s+тела)?|кг|весы)\D{0,12}(\d{2,3}(?:\.\d)?)",
+        s,
+        re.I,
+    )
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(\d{2,3}(?:\.\d)?)\s*кг\b", s, re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+async def _save_weight(message: types.Message, w: float, source: str = "manual") -> None:
+    s = await get_settings_map()
+    had_weight = bool(str(s.get("weight_kg", "")).strip())
+    await set_setting("weight_kg", f"{w:.1f}")
+    await append_row_to_sheet(
+        "Вес_Динамика",
+        [now_local().strftime("%Y-%m-%d %H:%M"), f"{w:.1f}", source, ""],
+    )
+    reason = "weight" if had_weight else "onboarding"
+    msg = await recalc_norms_for_user({**s, "weight_kg": f"{w:.1f}"}, reason=reason)
+    await message.answer(f"Отлично, вес <b>{w:.1f} кг</b> записала ✨")
+    if msg:
+        await message.answer(msg)
+    await message.answer("Чем ещё помочь?", reply_markup=_main_kb())
 
 
 def _sex_kb() -> InlineKeyboardMarkup:
@@ -90,8 +128,8 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
     await log_meal_row(staple, grams, m)
     kcal = m["kcal"] * grams / 100
     await message.answer(
-        f"<b>Записано</b>\n{staple} — {grams:.0f} г\n≈ {kcal:.0f} ккал "
-        f"(Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})"
+        f"Записала 🍽\n<b>{staple}</b> — {grams:.0f} г\n"
+        f"≈ {kcal:.0f} ккал (Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})"
     )
 
 
@@ -111,10 +149,11 @@ async def nut_start(message: types.Message, state: FSMContext):
         await message.answer("Напиши вес в кг одним числом.\nПример: <code>90</code>")
         return
     await message.answer(
-        "<b>Нутрициолог</b>\n"
+        "Привет! Я рядом с питанием 💛\n\n"
         "• Еда — текстом, голосом или фото («овсянка 200г»)\n"
-        "• Вес — одним числом, например <code>90</code>\n"
-        "• Копилка — сколько уже съела за день",
+        "• Вес — кнопка «Записать вес» или число <code>90</code>\n"
+        "• Копилка — сколько уже съела за день\n\n"
+        "Каждое утро в 8:30 напомню взвеситься.",
         reply_markup=_main_kb(),
     )
 
@@ -173,30 +212,42 @@ async def redo_ob(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+@nutrition_router.callback_query(F.data == "nut_weigh")
+async def cb_weigh(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(NutWeigh.waiting)
+    await call.message.answer("Напиши вес в кг одним числом.\nПример: <code>90</code> или <code>89.5</code>")
+    await call.answer()
+
+
+@nutrition_router.message(NutWeigh.waiting, F.text)
+async def weigh_waiting(message: types.Message, state: FSMContext):
+    w = _extract_weight_kg(message.text or "")
+    if w is None or w < 30 or w > 250:
+        await message.answer("Не увидела вес. Пришли число, например <code>90</code>.")
+        return
+    await state.clear()
+    await _save_weight(message, w)
+
+
 @nutrition_router.message(StateFilter(None), F.text.regexp(r"^\s*\d{2}(\.\d)?\s*$"))
 async def weight_number(message: types.Message):
     s = await get_settings_map()
     if not _profile_base_ok(s):
         return
     w = float(message.text.replace(",", "."))
-    had_weight = bool(str(s.get("weight_kg", "")).strip())
-    await set_setting("weight_kg", f"{w:.1f}")
-    await append_row_to_sheet(
-        "Вес_Динамика",
-        [now_local().strftime("%Y-%m-%d %H:%M"), f"{w:.1f}", "manual", ""],
-    )
-    reason = "weight" if had_weight else "onboarding"
-    msg = await recalc_norms_for_user({**s, "weight_kg": f"{w:.1f}"}, reason=reason)
-    if msg:
-        await message.answer(msg)
-    await message.answer("Меню:", reply_markup=_main_kb())
+    await _save_weight(message, w)
 
 
 @nutrition_router.message(StateFilter(None), F.text & ~F.text.regexp(r"^\s*\d{2}(\.\d)?\s*$"))
 async def food_text_free(message: types.Message):
     s = await get_settings_map()
     if _profile_base_ok(s) and not str(s.get("weight_kg", "")).strip():
-        await message.answer("Сначала пришли вес кг одним числом.")
+        await message.answer("Сначала запиши вес — кнопкой или числом.")
+        return
+    w = _extract_weight_kg(message.text or "")
+    if w is not None and w >= 30 and w <= 250:
+        # «Масса тела: 90» / «вес 90» — не еда
+        await _save_weight(message, w)
         return
     await _process_food_text(message)
 
@@ -221,14 +272,9 @@ async def photo_any(message: types.Message, bot: Bot):
     s = await get_settings_map()
     if m and "НЕТ" not in raw_w.upper():
         w = float(m.group(1).replace(",", "."))
-        await set_setting("weight_kg", f"{w:.1f}")
-        await append_row_to_sheet("Вес_Динамика", [now_local().strftime("%Y-%m-%d %H:%M"), f"{w:.1f}", "photo", raw_w[:80]])
-        if await _settings_complete({**s, "weight_kg": f"{w:.1f}"}):
-            msg = await recalc_norms_for_user({**s, "weight_kg": f"{w:.1f}"}, reason="weight")
-            if msg:
-                await message.answer(msg)
-            await message.answer("Меню:", reply_markup=_main_kb())
-        return
+        if 30 <= w <= 250:
+            await _save_weight(message, w, source="photo")
+            return
     desc = await call_gemini("Опиши еду на фото одним коротким предложением на русском.", media_b64=b64, mime_type="image/jpeg")
     await _process_food_text(message, text_override=desc)
 

@@ -73,11 +73,12 @@ def _scale_val(data: str) -> int:
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "<b>Тренер</b>\n"
-        "• План — собрать тренировку\n"
-        "• Старт — чек-ин и подходы\n"
-        "• Отчёты и календарь — прогресс\n"
-        "• Проверить Gemini — связь с ИИ",
+        "Привет! Я твой тренер 💪\n\n"
+        "• <b>План</b> — соберём тренировку\n"
+        "• <b>Старт</b> — чек-ин и живые подходы\n"
+        "• <b>Отчёты / календарь</b> — как растёшь\n"
+        "• <b>Проверить Gemini</b> — связь с ИИ\n\n"
+        "Готова? Жми «План» или «Старт».",
         reply_markup=trainer_main_kb(),
     )
     await record_user_chat("trainer", message.chat.id)
@@ -103,8 +104,11 @@ async def cb_plan_menu(call: types.CallbackQuery):
 @trainer_router.callback_query(F.data == "tr_gen_plan")
 async def cb_gen_plan(call: types.CallbackQuery):
     await call.answer()
-    await call.message.answer("Составляю план…")
+    await call.message.answer("Собираю план из твоей базы упражнений…")
     db = await ExerciseDB.load()
+    if not db.by_id:
+        await call.message.answer("В таблице нет упражнений. Заполни лист «Список упражнений».")
+        return
     plan = await generate_workout_plan(db)
     if plan.get("error"):
         await call.message.answer(str(plan["error"]))
@@ -206,7 +210,7 @@ async def cb_reset(call: types.CallbackQuery, state: FSMContext):
 @trainer_router.callback_query(F.data == "tr_start_flow")
 async def cb_start_flow(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(TrSession.check_cns)
-    await call.message.answer("Чек-ин: ЦНС/сон 1–10?", reply_markup=scale_1_10("tr_pre_cns"))
+    await call.message.answer("Как самочувствие?\nЦНС / сон — от 1 до 10:", reply_markup=scale_1_10("tr_pre_cns"))
     await call.answer()
 
 
@@ -214,7 +218,7 @@ async def cb_start_flow(call: types.CallbackQuery, state: FSMContext):
 async def cb_pre_cns(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(pre_cns=_scale_val(call.data))
     await state.set_state(TrSession.check_joint)
-    await call.message.answer("Суставы 1–10?", reply_markup=scale_1_10("tr_pre_joint"))
+    await call.message.answer("Суставы сегодня — от 1 до 10?", reply_markup=scale_1_10("tr_pre_joint"))
     await call.answer()
 
 
@@ -222,7 +226,7 @@ async def cb_pre_cns(call: types.CallbackQuery, state: FSMContext):
 async def cb_pre_joint(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(pre_joint=_scale_val(call.data))
     await state.set_state(TrSession.check_psy)
-    await call.message.answer("Психика/мотивация 1–10?", reply_markup=scale_1_10("tr_pre_psy"))
+    await call.message.answer("Настрой и мотивация — от 1 до 10?", reply_markup=scale_1_10("tr_pre_psy"))
     await call.answer()
 
 
@@ -230,7 +234,7 @@ async def cb_pre_joint(call: types.CallbackQuery, state: FSMContext):
 async def cb_pre_psy(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(pre_psy=_scale_val(call.data))
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Начать тренировку", callback_data="tr_begin_session")]])
-    await call.message.answer("Разминка только в боте. Нажми «Начать» — зафиксируем время старта.", reply_markup=kb)
+    await call.message.answer("Супер. Сделай короткую разминку и жми «Начать» — зафиксирую старт.", reply_markup=kb)
     await call.answer()
 
 
@@ -272,7 +276,11 @@ async def _show_exercise(message: types.Message, state: FSMContext):
         await _goto_checkout(message, state)
         return
     ex = sess[idx]
-    text = f"Упражнение {idx+1}/{len(sess)}: <b>{ex['name']}</b>\nПодход {len(ex['sets'])+1}."
+    text = (
+        f"Упражнение {idx+1}/{len(sess)}\n"
+        f"<b>{ex['name']}</b>\n"
+        f"Подход {len(ex['sets'])+1}. Запиши вес×повторы, когда будешь готова."
+    )
     await message.answer(text, reply_markup=session_exercise_kb(idx))
 
 
@@ -285,7 +293,8 @@ async def cb_set_done(call: types.CallbackQuery, state: FSMContext):
     hist = await exercise_has_history(ex["exercise_id"])
     need_bl = (not hist) and len(ex["sets"]) == 0
     await state.update_data(cur_idx=idx)
-    await call.message.answer("Введи вес и повторы текстом или голосом (baseline)" if need_bl else "Введи вес и повторы текстом или голосом.")
+    tip = "Первый раз это упражнение — напиши свои вес и повторы (например 40×10)." if need_bl else "Напиши вес и повторы: например <code>40×10</code> или голосом."
+    await call.message.answer(tip)
     await call.answer()
 
 
@@ -313,12 +322,15 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
         )
     parsed = await parse_set_gemini(txt)
     if not parsed:
-        await message.answer("Не разобрал. Пример: 60 кг 8 раз")
+        await message.answer("Не расслышала. Пример: <code>60×8</code> или «60 кг 8 раз».")
         return
     ex["sets"].append({"weight": parsed["weight"], "reps": parsed["reps"]})
     await state.update_data(session=sess, await_baseline=False)
     si = len(ex["sets"]) - 1
-    await message.answer("Оценка тяжести подхода 1–10?", reply_markup=scale_set_difficulty_kb(idx, si))
+    await message.answer(
+        f"Записала: {parsed['weight']:g} кг × {parsed['reps']:g}.\nНасколько тяжело было (1–10)?",
+        reply_markup=scale_set_difficulty_kb(idx, si),
+    )
 
 
 @trainer_router.callback_query(F.data.startswith("trsd:"))
@@ -331,7 +343,7 @@ async def cb_set_diff(call: types.CallbackQuery, state: FSMContext):
     if si < len(ex["sets"]):
         ex["sets"][si]["difficulty"] = diff
     await state.update_data(session=sess)
-    await call.message.answer("Таймер отдыха:", reply_markup=rest_kb("r"))
+    await call.message.answer("Сколько отдыхаем?", reply_markup=rest_kb("r"))
     await call.answer()
 
 
@@ -340,16 +352,23 @@ async def cb_rest(call: types.CallbackQuery):
     parts = call.data.split(":")
     sec = int(parts[2]) if len(parts) > 2 else 90
     chat = call.message.chat.id
+    try:
+        await call.message.edit_text(f"Отдыхаем {sec} сек… ⏳")
+    except Exception:
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await call.answer(f"{sec} сек")
 
     async def ping():
         await asyncio.sleep(sec)
         try:
-            await call.bot.send_message(chat, f"Отдых {sec}s — можно следующий подход.")
+            await call.bot.send_message(chat, "Приступай к следующему подходу 💪")
         except Exception:
             pass
 
     asyncio.create_task(ping())
-    await call.answer(f"Таймер {sec}s")
 
 
 @trainer_router.callback_query(F.data.startswith("tr_skip_set:"))
@@ -470,14 +489,14 @@ async def cb_abort(call: types.CallbackQuery, state: FSMContext):
 
 async def _goto_checkout(message: types.Message, state: FSMContext):
     await state.set_state(TrSession.checkout_cns)
-    await message.answer("Чек-аут: ЦНС 1–10?", reply_markup=scale_1_10("tr_post_cns"))
+    await message.answer("Финиш почти! Как ЦНС после тренировки (1–10)?", reply_markup=scale_1_10("tr_post_cns"))
 
 
 @trainer_router.callback_query(F.data.startswith("tr_post_cns_"))
 async def cb_post_cns(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(post_cns=_scale_val(call.data))
     await state.set_state(TrSession.checkout_joint)
-    await call.message.answer("Суставы после?", reply_markup=scale_1_10("tr_post_joint"))
+    await call.message.answer("Суставы после тренировки (1–10)?", reply_markup=scale_1_10("tr_post_joint"))
     await call.answer()
 
 
@@ -485,7 +504,7 @@ async def cb_post_cns(call: types.CallbackQuery, state: FSMContext):
 async def cb_post_joint(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(post_joint=_scale_val(call.data))
     await state.set_state(TrSession.checkout_ctrl)
-    await call.message.answer("Контроль ~70% выполнено?", reply_markup=scale_1_10("tr_post_ctrl"))
+    await call.message.answer("Насколько держала контроль техники ~70% (1–10)?", reply_markup=scale_1_10("tr_post_ctrl"))
     await call.answer()
 
 

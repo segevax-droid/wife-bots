@@ -68,17 +68,18 @@ async def parse_workout_plan(text: str, db: ExerciseDB) -> Dict[str, Any]:
 
 
 def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
+    pool = db.real_named()
     by_g: Dict[str, list] = {}
-    for ex in db.by_id.values():
+    for ex in pool:
         by_g.setdefault(ex.get("group") or "Прочее", []).append(ex)
     picked = []
-    for g in ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор"):
+    for g in ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Ягодицы", "Пресс"):
         if by_g.get(g):
             picked.append(by_g[g][0])
         if len(picked) >= 6:
             break
     if len(picked) < 5:
-        for ex in db.by_id.values():
+        for ex in pool:
             if ex not in picked:
                 picked.append(ex)
             if len(picked) >= 6:
@@ -101,14 +102,15 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
 async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any]:
     """AI builds a full-body plan; names must come from the provided catalog only."""
     catalog = []
-    for ex in list(db.by_id.values())[:40]:
+    for ex in db.real_named()[:50]:
         catalog.append({"id": ex["id"], "name": ex["name"], "group": ex.get("group", "")})
     prompt = (
-        "Ты тренер. Составь план на 1 тренировку (5–8 упражнений) из каталога. "
+        "Ты дружелюбный тренер. Составь план на 1 тренировку (5–8 упражнений) ТОЛЬКО из каталога. "
+        "Бери точные name из каталога, без «упражнение 1/2». "
         "Только JSON без markdown: "
         '{"exercises":[{"name":"...","sets":3,"reps_target":10,"weight_kg":null}]}. '
         f"Подсказка: {hint or 'общее развитие силы'}. "
-        f"Каталог: {json.dumps(catalog, ensure_ascii=False)[:3500]}"
+        f"Каталог: {json.dumps(catalog, ensure_ascii=False)[:4000]}"
     )
     raw = await call_gemini(prompt)
     if not (raw.startswith("⚠️") or raw.startswith("⏳")):

@@ -7,7 +7,6 @@ from aiogram import Bot
 
 from app.config import WIFE_MEAL_REMINDER_TIMES
 from app.nutrition.norms import recalc_norms_for_user
-from app.nutrition.weight import morning_weigh_prompt_kb
 from app.sheets import get_settings_map
 from app.state import SYSTEM_STATE, load_state_from_sheet, now_local, save_state_pairs
 from app.trainer.reminders import maybe_send_workout_reminders
@@ -35,7 +34,16 @@ async def _tick_morning_weigh(bot_nutrition: Bot) -> None:
     if SYSTEM_STATE.get(key) == "1":
         return
     try:
-        await bot_nutrition.send_message(int(cid), "Утро. Взвесься и пришли вес (число или фото весов).", reply_markup=morning_weigh_prompt_kb())
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Записать вес", callback_data="nut_weigh")]]
+        )
+        await bot_nutrition.send_message(
+            int(cid),
+            "Доброе утро ☀️\nПора на весы — пришли число кг или нажми кнопку.",
+            reply_markup=kb,
+        )
     except Exception as e:
         logger.warning("morning weigh: %s", e)
     await save_state_pairs({key: "1"})
@@ -85,7 +93,7 @@ async def background_loop(bot_trainer: Bot, bot_nutrition: Bot) -> None:
             await load_state_from_sheet()
             nl = now_local()
             hh, mm = nl.hour, nl.minute
-            if hh == 8 and mm == 0:
+            if hh == 8 and mm == 30:
                 await _tick_morning_weigh(bot_nutrition)
             await _tick_meal_reminders(bot_nutrition, hh, mm)
             if hh == 3 and mm == 0:

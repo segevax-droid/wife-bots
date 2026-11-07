@@ -18,7 +18,7 @@ def is_allowed_chat(chat_id: int) -> bool:
     return chat_id in WIFE_ALLOWED_CHAT_IDS
 
 
-async def send_cross_notification(from_role: str, text: str, trainer_bot: Bot, nutrition_bot: Bot) -> None:
+async def send_cross_notification(from_role: str, text: str, trainer_bot: Bot, nutrition_bot: Bot) -> None:  # noqa: D401
     if from_role == "trainer":
         cid = SYSTEM_STATE.get("chat_Nutrition")
         bot = nutrition_bot
