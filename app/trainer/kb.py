@@ -52,9 +52,9 @@ def rest_kb(timer_id: str, ex_idx: Optional[int] = None) -> InlineKeyboardMarkup
 
 def analogues_pick_kb(ex_idx: int, items: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
-    for ex in items[:3]:
+    for i, ex in enumerate(items[:3]):
         label = (ex.get("name") or ex.get("id", ""))[:36]
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"tr_anlg:{ex_idx}:{ex['id']}")])
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"tr_anlg:{ex_idx}:{i}")])
     rows.append([InlineKeyboardButton(text="Ещё ×3", callback_data=f"tr_analog:{ex_idx}")])
     rows.append(_back_row(f"tr_back_ex:{ex_idx}"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -73,17 +73,14 @@ def session_exercise_kb(ex_idx: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Подход +1", callback_data=f"tr_set_done:{ex_idx}"),
                 InlineKeyboardButton(text="Пропуск сета", callback_data=f"tr_skip_set:{ex_idx}"),
-            ],
-            [
-                InlineKeyboardButton(text="Другое упражнение (тренажёр)", callback_data=f"tr_swap:{ex_idx}"),
-                InlineKeyboardButton(text="Аналоги ×3", callback_data=f"tr_analog:{ex_idx}"),
-            ],
-            [
-                InlineKeyboardButton(text="Техника", callback_data=f"tr_tech:{ex_idx}"),
                 InlineKeyboardButton(text="Завершить упражнение", callback_data=f"tr_finish_ex:{ex_idx}"),
             ],
+            [
+                InlineKeyboardButton(text="Другое из плана", callback_data=f"tr_swap:{ex_idx}"),
+                InlineKeyboardButton(text="Аналоги ×3", callback_data=f"tr_analog:{ex_idx}"),
+            ],
+            [InlineKeyboardButton(text="Техника", callback_data=f"tr_tech:{ex_idx}")],
             [InlineKeyboardButton(text="Прервать тренировку", callback_data="tr_abort")],
         ]
     )

@@ -43,6 +43,23 @@ def _main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _weigh_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="« Отмена", callback_data="nut_weigh_cancel")]]
+    )
+
+
+def _after_food_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Копилка дня", callback_data="nut_bank"),
+                InlineKeyboardButton(text="Записать вес", callback_data="nut_weigh"),
+            ]
+        ]
+    )
+
+
 def _extract_weight_kg(text: str) -> Optional[float]:
     s = (text or "").strip().replace(",", ".")
     if re.fullmatch(r"\d{2,3}(?:\.\d)?", s):
@@ -82,7 +99,8 @@ def _sex_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Ж", callback_data="nut_sex:ж"),
                 InlineKeyboardButton(text="М", callback_data="nut_sex:м"),
-            ]
+            ],
+            [InlineKeyboardButton(text="« Назад", callback_data="nut_ob_back:age")],
         ]
     )
 
@@ -91,15 +109,21 @@ def _act_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for code, label in [("sed", "Мало"), ("light", "Лёгкая"), ("mod", "Умер."), ("high", "Высок.")]:
         b.button(text=label, callback_data=f"nut_act:{code}")
+    b.button(text="« Назад", callback_data="nut_ob_back:sex")
     b.adjust(2)
     return b.as_markup()
 
 
 def _goal_kb() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    for code, label in [("cut", "Похудение"), ("maint", "Поддержание")]:
-        b.button(text=label, callback_data=f"nut_goal:{code}")
-    return b.as_markup()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Похудение", callback_data="nut_goal:cut"),
+                InlineKeyboardButton(text="Поддержание", callback_data="nut_goal:maint"),
+            ],
+            [InlineKeyboardButton(text="« Назад", callback_data="nut_ob_back:act")],
+        ]
+    )
 
 
 def _profile_base_ok(s: Dict[str, str]) -> bool:
@@ -129,7 +153,8 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
     kcal = m["kcal"] * grams / 100
     await message.answer(
         f"Записала 🍽\n<b>{staple}</b> — {grams:.0f} г\n"
-        f"≈ {kcal:.0f} ккал (Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})"
+        f"≈ {kcal:.0f} ккал (Б {m['p']*grams/100:.1f} / Ж {m['f']*grams/100:.1f} / У {m['c']*grams/100:.1f})",
+        reply_markup=_after_food_kb(),
     )
 
 
@@ -146,7 +171,11 @@ async def nut_start(message: types.Message, state: FSMContext):
         )
         return
     if not str(s.get("weight_kg", "")).strip():
-        await message.answer("Напиши вес в кг одним числом.\nПример: <code>90</code>")
+        await state.set_state(NutWeigh.waiting)
+        await message.answer(
+            "Остался вес — напиши кг одним числом.\nПример: <code>90</code>",
+            reply_markup=_weigh_kb(),
+        )
         return
     await message.answer(
         "Привет! Я рядом с питанием 💛\n\n"
@@ -165,7 +194,7 @@ async def ob_height(message: types.Message, state: FSMContext):
         return
     await set_setting("height_cm", message.text.strip())
     await state.set_state(NutOnboard.age)
-    await message.answer("Возраст (полных лет числом).")
+    await message.answer("Возраст (полных лет числом). Можно /start — начать сначала.")
 
 
 @nutrition_router.message(NutOnboard.age, F.text)
@@ -200,8 +229,26 @@ async def ob_act(call: types.CallbackQuery, state: FSMContext):
 async def ob_goal(call: types.CallbackQuery, state: FSMContext):
     goal = call.data.split(":", 1)[1]
     await set_setting("goal", goal)
-    await state.clear()
-    await call.message.answer("Теперь пришли текущий вес кг числом (обязательно).")
+    await state.set_state(NutWeigh.waiting)
+    await call.message.answer(
+        "Теперь текущий вес — одним числом кг.\nПример: <code>90</code> или <code>89.5</code>",
+        reply_markup=_weigh_kb(),
+    )
+    await call.answer()
+
+
+@nutrition_router.callback_query(F.data.startswith("nut_ob_back:"))
+async def ob_back(call: types.CallbackQuery, state: FSMContext):
+    step = call.data.split(":")[-1]
+    if step == "age":
+        await state.set_state(NutOnboard.height)
+        await call.message.answer("Рост в см одним числом.\nПример: <code>165</code>")
+    elif step == "sex":
+        await state.set_state(NutOnboard.age)
+        await call.message.answer("Возраст (полных лет числом).")
+    else:
+        await state.set_state(NutOnboard.sex)
+        await call.message.answer("Пол:", reply_markup=_sex_kb())
     await call.answer()
 
 
@@ -215,30 +262,50 @@ async def redo_ob(call: types.CallbackQuery, state: FSMContext):
 @nutrition_router.callback_query(F.data == "nut_weigh")
 async def cb_weigh(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(NutWeigh.waiting)
-    await call.message.answer("Напиши вес в кг одним числом.\nПример: <code>90</code> или <code>89.5</code>")
+    await call.message.answer(
+        "Напиши вес в кг одним числом.\nПример: <code>90</code> или <code>89.5</code>",
+        reply_markup=_weigh_kb(),
+    )
     await call.answer()
 
 
-@nutrition_router.message(NutWeigh.waiting, F.text)
-async def weigh_waiting(message: types.Message, state: FSMContext):
-    w = _extract_weight_kg(message.text or "")
+@nutrition_router.callback_query(F.data == "nut_weigh_cancel")
+async def cb_weigh_cancel(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.answer("Ок, вес не записываю.", reply_markup=_main_kb())
+    await call.answer()
+
+
+@nutrition_router.message(NutWeigh.waiting, F.text | F.voice)
+async def weigh_waiting(message: types.Message, state: FSMContext, bot: Bot):
+    txt = message.text or ""
+    if message.voice:
+        txt = await transcribe_voice_message(bot, message) or ""
+    w = _extract_weight_kg(txt)
+    if w is None:
+        m = re.search(r"(\d{2,3}(?:[.,]\d)?)", txt)
+        if m:
+            w = float(m.group(1).replace(",", "."))
     if w is None or w < 30 or w > 250:
-        await message.answer("Не увидела вес. Пришли число, например <code>90</code>.")
+        await message.answer("Не увидела вес. Пришли число, например <code>90</code>.", reply_markup=_weigh_kb())
         return
     await state.clear()
     await _save_weight(message, w)
 
 
-@nutrition_router.message(StateFilter(None), F.text.regexp(r"^\s*\d{2}(\.\d)?\s*$"))
+@nutrition_router.message(StateFilter(None), F.text.regexp(r"^\s*\d{2,3}([.,]\d)?\s*$"))
 async def weight_number(message: types.Message):
     s = await get_settings_map()
     if not _profile_base_ok(s):
         return
-    w = float(message.text.replace(",", "."))
+    w = float(message.text.replace(",", ".").strip())
+    if w < 30 or w > 250:
+        await _process_food_text(message)
+        return
     await _save_weight(message, w)
 
 
-@nutrition_router.message(StateFilter(None), F.text & ~F.text.regexp(r"^\s*\d{2}(\.\d)?\s*$"))
+@nutrition_router.message(StateFilter(None), F.text & ~F.text.regexp(r"^\s*\d{2,3}([.,]\d)?\s*$"))
 async def food_text_free(message: types.Message):
     s = await get_settings_map()
     if _profile_base_ok(s) and not str(s.get("weight_kg", "")).strip():
@@ -256,7 +323,11 @@ async def food_text_free(message: types.Message):
 async def food_voice(message: types.Message, bot: Bot):
     t = await transcribe_voice_message(bot, message)
     if not t:
-        await message.answer("Не расшифровал голос.")
+        await message.answer("Не расшифровала голос. Напиши текстом?")
+        return
+    w = _extract_weight_kg(t)
+    if w is not None and 30 <= w <= 250:
+        await _save_weight(message, w, source="voice")
         return
     await _process_food_text(message, text_override=t)
 
@@ -294,7 +365,7 @@ async def cb_bank(call: types.CallbackQuery):
         f"Жиры     {progress_bar(f_, tgt['f'])}  {f_:.0f} / {tgt['f']:.0f} г\n"
         f"Углеводы {progress_bar(c, tgt['c'])}  {c:.0f} / {tgt['c']:.0f} г"
     )
-    await call.message.answer(text)
+    await call.message.answer(text, reply_markup=_main_kb())
     await call.answer()
 
 
