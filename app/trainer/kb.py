@@ -28,6 +28,7 @@ def trainer_main_kb() -> InlineKeyboardMarkup:
 def plan_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Составить план ИИ", callback_data="tr_gen_plan")],
             [InlineKeyboardButton(text="Последний план", callback_data="tr_last_plan")],
             [InlineKeyboardButton(text="« Меню", callback_data="tr_main")],
         ]

@@ -97,6 +97,8 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
 @nutrition_router.message(Command("menu"), StateFilter(None))
 async def nut_start(message: types.Message, state: FSMContext):
     await state.clear()
+    # Always answer first — Sheets must not block Telegram reply
+    await message.answer("Нутрициолог. Проверяю профиль…")
     try:
         await record_user_chat("nutrition", message.chat.id)
     except Exception:
@@ -112,7 +114,7 @@ async def nut_start(message: types.Message, state: FSMContext):
     if not str(s.get("weight_kg", "")).strip():
         await message.answer("Пришли текущий вес кг одним числом.")
         return
-    await message.answer("Нутрициолог. Меню:", reply_markup=_main_kb())
+    await message.answer("Меню:", reply_markup=_main_kb())
 
 
 @nutrition_router.message(NutOnboard.height, F.text)

@@ -35,30 +35,41 @@ async def gemini_raw_request(payload: dict) -> Tuple[int, dict, str]:
             return status, {}, raw_text
 
 
+def _gemini_error_hint(status: int, raw: str) -> str:
+    low = (raw or "").lower()
+    if status == 400 and ("api key not valid" in low or "invalid" in low and "key" in low):
+        return "Ключ Gemini неверный. Проверь WIFE_GEMINI_API_KEY на Render (aistudio.google.com/apikey)."
+    if status == 403:
+        return "Доступ к Gemini запрещён (403). Проверь ключ и ограничения API key."
+    if status == 429:
+        return "Лимит Gemini (429). Подожди и повтори."
+    return f"Ошибка {status}: {(raw or '')[:80]}"
+
+
 async def ping_gemini_quota() -> str:
+    if not WIFE_GEMINI_API_KEY:
+        return "WIFE_GEMINI_API_KEY пуст на сервере."
     t0 = asyncio.get_event_loop().time()
     try:
         status, _, raw = await gemini_raw_request({"contents": [{"parts": [{"text": "ping"}]}]})
         lat = round(asyncio.get_event_loop().time() - t0, 2)
         if status == 200:
             return f"OK. Модель: {GEMINI_MODEL}. Задержка: {lat}s"
-        if status == 429:
-            return f"429. Модель: {GEMINI_MODEL}."
-        return f"Ошибка {status}: {raw[:80]}"
+        return _gemini_error_hint(status, raw)
     except Exception as e:
         return f"Сеть: {str(e)[:60]}"
 
 
 async def call_gemini(prompt: str, media_b64: Optional[str] = None, mime_type: Optional[str] = None) -> str:
+    if not WIFE_GEMINI_API_KEY:
+        return "⚠️ WIFE_GEMINI_API_KEY пуст."
     parts: List[Dict[str, Any]] = [{"text": prompt}]
     if media_b64 and mime_type:
         parts.append({"inline_data": {"mime_type": mime_type, "data": media_b64}})
     try:
         status, data, raw = await gemini_raw_request({"contents": [{"parts": parts}]})
-        if status == 429:
-            return "⏳ Лимит Gemini (429)."
         if status != 200:
-            return f"⚠️ Gemini {status}: {raw[:120]}"
+            return "⚠️ " + _gemini_error_hint(status, raw)
         cands = data.get("candidates", [])
         if cands:
             return cands[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()

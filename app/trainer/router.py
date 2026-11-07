@@ -20,7 +20,7 @@ from app.trainer.calendar_png import current_month_tonnage_map, month_png_bytes
 from app.trainer.energy import estimate_session_kcal
 from app.trainer.exercise_db import ExerciseDB
 from app.trainer.kb import plan_menu_kb, rest_kb, scale_1_10, scale_set_difficulty_kb, session_exercise_kb, tech_close_kb, trainer_main_kb
-from app.trainer.plan_parse import parse_workout_plan, plan_to_state
+from app.trainer.plan_parse import generate_workout_plan, parse_workout_plan, plan_to_state
 from app.trainer.progression import next_load_hint
 from app.trainer.reminders import handle_light_home
 from app.trainer.reports import compare_last_session, report_vs_avg_four_weeks, week_month_top_moves
@@ -93,8 +93,24 @@ async def cb_diag(call: types.CallbackQuery):
 
 @trainer_router.callback_query(F.data == "tr_plan_menu")
 async def cb_plan_menu(call: types.CallbackQuery):
-    await call.message.answer("План: отправь текст в чат или «/plan …». Или:", reply_markup=plan_menu_kb())
+    await call.message.answer(
+        "План: «Составить план ИИ» — тренер сам соберёт тренировку.\n"
+        "Или пришли текст / «/plan …» — разберём вручную.",
+        reply_markup=plan_menu_kb(),
+    )
     await call.answer()
+
+
+@trainer_router.callback_query(F.data == "tr_gen_plan")
+async def cb_gen_plan(call: types.CallbackQuery):
+    await call.answer()
+    await call.message.answer("Составляю план…")
+    db = await ExerciseDB.load()
+    plan = await generate_workout_plan(db)
+    if plan.get("error"):
+        await call.message.answer(str(plan["error"]))
+        return
+    await _save_plan(call.message, plan)
 
 
 @trainer_router.message(Command("plan"))
@@ -108,18 +124,29 @@ async def ingest_long_plan(message: types.Message):
         await _ingest_plan_msg(message)
 
 
+async def _save_plan(message: types.Message, plan: dict) -> None:
+    st = plan_to_state(plan)
+    await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
+    await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
+    n = len(st.get("exercises", []))
+    names = ", ".join(e["name"] for e in st.get("exercises", [])[:8])
+    await message.answer(f"План готов: {n} упражнений.\n{names}", reply_markup=trainer_main_kb())
+
+
 async def _ingest_plan_msg(message: types.Message):
-    await record_user_chat("trainer", message.chat.id)
+    try:
+        await record_user_chat("trainer", message.chat.id)
+    except Exception:
+        pass
     text = message.text or ""
     if text.startswith("/plan"):
         text = text.replace("/plan", "", 1).strip()
     db = await ExerciseDB.load()
     plan = await parse_workout_plan(text, db)
-    st = plan_to_state(plan)
-    await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
-    await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
-    n = len(st.get("exercises", []))
-    await message.answer(f"План принят: {n} упражнений.", reply_markup=trainer_main_kb())
+    if plan.get("error"):
+        await message.answer(str(plan["error"]))
+        return
+    await _save_plan(message, plan)
 
 
 @trainer_router.callback_query(F.data == "tr_last_plan")
