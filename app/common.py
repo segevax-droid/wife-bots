@@ -59,11 +59,25 @@ def register_acl(dp):
                 uid = event.message.chat.id
             if uid is None and hasattr(event, "from_user") and event.from_user:
                 uid = event.from_user.id
+
+            if isinstance(event, types.Message) and (event.text or "").strip():
+                cmd = (event.text or "").strip().split()[0].split("@")[0].lower()
+                if cmd == "/myid":
+                    cid = event.chat.id if event.chat else uid
+                    await event.answer(
+                        f"Твой chat id: <code>{cid}</code>\n"
+                        "Добавь это число в <code>WIFE_ALLOWED_CHAT_IDS</code> на Render, если бот не отвечает."
+                    )
+                    return None
+
             if uid is not None and not is_allowed_chat(uid):
+                hint = f"Нет доступа (id <code>{uid}</code>). Добавь в WIFE_ALLOWED_CHAT_IDS на Render."
                 if isinstance(event, types.CallbackQuery):
                     await event.answer("Нет доступа.", show_alert=True)
+                    if event.message:
+                        await event.message.answer(hint)
                 elif isinstance(event, types.Message):
-                    await event.answer("Нет доступа.")
+                    await event.answer(hint)
                 return None
             return await handler(event, data)
 

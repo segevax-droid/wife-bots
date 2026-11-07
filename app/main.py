@@ -11,10 +11,10 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from app.bot_filters import IsBotToken
 from app.common import common_router, register_acl
 from app.config import (
     PORT,
+    WIFE_ALLOWED_CHAT_IDS,
     WIFE_NUTRITION_TOKEN,
     WIFE_RENDER_EXTERNAL_URL,
     WIFE_TRAINER_TOKEN,
@@ -44,10 +44,7 @@ class InjectBotsMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-def build_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
-
+def _register_errors(dp: Dispatcher) -> None:
     @dp.errors()
     async def on_handler_error(event: ErrorEvent):
         logger.exception("update handler failed: %s", event.exception)
@@ -65,18 +62,29 @@ def build_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
         except Exception as notify_err:
             logger.warning("could not notify user about error: %s", notify_err)
 
+
+def build_trainer_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
+    dp = Dispatcher(storage=MemoryStorage())
+    _register_errors(dp)
     register_acl(dp)
     dp.message.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
     dp["bot_trainer"] = bot_trainer
     dp["bot_nutrition"] = bot_nutrition
-    # One Dispatcher serves both bots — scope each router to its token
-    trainer_router.message.filter(IsBotToken(WIFE_TRAINER_TOKEN))
-    trainer_router.callback_query.filter(IsBotToken(WIFE_TRAINER_TOKEN))
-    nutrition_router.message.filter(IsBotToken(WIFE_NUTRITION_TOKEN))
-    nutrition_router.callback_query.filter(IsBotToken(WIFE_NUTRITION_TOKEN))
     dp.include_router(common_router)
     dp.include_router(trainer_router)
+    return dp
+
+
+def build_nutrition_dispatcher(bot_trainer: Bot, bot_nutrition: Bot) -> Dispatcher:
+    dp = Dispatcher(storage=MemoryStorage())
+    _register_errors(dp)
+    register_acl(dp)
+    dp.message.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
+    dp.callback_query.middleware(InjectBotsMiddleware(bot_trainer, bot_nutrition))
+    dp["bot_trainer"] = bot_trainer
+    dp["bot_nutrition"] = bot_nutrition
+    dp.include_router(common_router)
     dp.include_router(nutrition_router)
     return dp
 
@@ -98,10 +106,14 @@ async def run_polling():
         sys.exit(1)
     bot_trainer = Bot(WIFE_TRAINER_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot_nutrition = Bot(WIFE_NUTRITION_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(bot_trainer, bot_nutrition)
+    dp_trainer = build_trainer_dispatcher(bot_trainer, bot_nutrition)
+    dp_nutrition = build_nutrition_dispatcher(bot_trainer, bot_nutrition)
     await _sheets_warmup()
     asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
-    await dp.start_polling(bot_trainer, bot_nutrition, allowed_updates=dp.resolve_used_update_types())
+    await asyncio.gather(
+        dp_trainer.start_polling(bot_trainer, allowed_updates=dp_trainer.resolve_used_update_types()),
+        dp_nutrition.start_polling(bot_nutrition, allowed_updates=dp_nutrition.resolve_used_update_types()),
+    )
 
 
 def create_app() -> web.Application:
@@ -114,14 +126,15 @@ def create_app() -> web.Application:
 
     bot_trainer = Bot(WIFE_TRAINER_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot_nutrition = Bot(WIFE_NUTRITION_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(bot_trainer, bot_nutrition)
+    dp_trainer = build_trainer_dispatcher(bot_trainer, bot_nutrition)
+    dp_nutrition = build_nutrition_dispatcher(bot_trainer, bot_nutrition)
 
     secret = WIFE_WEBHOOK_SECRET.strip() or None
 
     app = web.Application()
 
-    trainer_wh = SimpleRequestHandler(dispatcher=dp, bot=bot_trainer, secret_token=secret)
-    nutrition_wh = SimpleRequestHandler(dispatcher=dp, bot=bot_nutrition, secret_token=secret)
+    trainer_wh = SimpleRequestHandler(dispatcher=dp_trainer, bot=bot_trainer, secret_token=secret)
+    nutrition_wh = SimpleRequestHandler(dispatcher=dp_nutrition, bot=bot_nutrition, secret_token=secret)
     trainer_wh.register(app, path="/webhook/trainer")
     nutrition_wh.register(app, path="/webhook/nutrition")
 
@@ -132,7 +145,8 @@ def create_app() -> web.Application:
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
 
-    setup_application(app, dp, bot=bot_trainer)
+    setup_application(app, dp_trainer, bot=bot_trainer)
+    setup_application(app, dp_nutrition, bot=bot_nutrition)
 
     base = WIFE_RENDER_EXTERNAL_URL.rstrip("/")
 
@@ -149,7 +163,11 @@ def create_app() -> web.Application:
                 f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw
             )
             _BOOT_WEBHOOKS_OK = True
-            logger.info("Webhooks set: %s/webhook/trainer|nutrition", base)
+            logger.info(
+                "Webhooks set: %s/webhook/trainer|nutrition (acl ids=%s)",
+                base,
+                sorted(WIFE_ALLOWED_CHAT_IDS) if WIFE_ALLOWED_CHAT_IDS else "any",
+            )
         except Exception as e:
             logger.exception("set_webhook failed: %s", e)
             return
