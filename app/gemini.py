@@ -14,25 +14,42 @@ from app.config import WIFE_GEMINI_API_KEY, WIFE_GEMINI_MODEL
 logger = logging.getLogger("wife_bots")
 
 GEMINI_MODEL = WIFE_GEMINI_MODEL
+_FALLBACK_MODELS = [
+    WIFE_GEMINI_MODEL,
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-flash-latest",
+    "gemini-1.5-flash",
+]
 
 
 async def gemini_raw_request(payload: dict) -> Tuple[int, dict, str]:
     global GEMINI_MODEL
     headers = {"Content-Type": "application/json", "x-goog-api-key": WIFE_GEMINI_API_KEY}
+    last_status, last_raw = 0, ""
+    seen = []
+    models = []
+    for m in _FALLBACK_MODELS:
+        if m and m not in seen:
+            seen.append(m)
+            models.append(m)
     async with ClientSession(timeout=ClientTimeout(total=45)) as session:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={WIFE_GEMINI_API_KEY}"
-        async with session.post(url, headers=headers, json=payload) as resp:
-            status, raw_text = resp.status, await resp.text()
-        if status in (404, 503) and GEMINI_MODEL != "gemini-2.0-flash":
-            fb = "gemini-2.0-flash"
-            url2 = f"https://generativelanguage.googleapis.com/v1beta/models/{fb}:generateContent?key={WIFE_GEMINI_API_KEY}"
-            async with session.post(url2, headers=headers, json=payload) as r2:
-                if r2.status == 200:
-                    GEMINI_MODEL, status, raw_text = fb, 200, await r2.text()
-        try:
-            return status, json.loads(raw_text), raw_text
-        except Exception:
-            return status, {}, raw_text
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={WIFE_GEMINI_API_KEY}"
+            async with session.post(url, headers=headers, json=payload) as resp:
+                last_status, last_raw = resp.status, await resp.text()
+            if last_status == 200:
+                GEMINI_MODEL = model
+                try:
+                    return last_status, json.loads(last_raw), last_raw
+                except Exception:
+                    return last_status, {}, last_raw
+            if last_status not in (404, 400, 503):
+                break
+    try:
+        return last_status, json.loads(last_raw), last_raw
+    except Exception:
+        return last_status, {}, last_raw
 
 
 def _gemini_error_hint(status: int, raw: str) -> str:

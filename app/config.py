@@ -25,7 +25,7 @@ for part in _raw_ids.replace(";", ",").split(","):
         WIFE_ALLOWED_CHAT_IDS.add(int(part))
 
 # Gemini (hub-compatible; fallback on 404/503)
-WIFE_GEMINI_MODEL = os.getenv("WIFE_GEMINI_MODEL", "gemini-2.0-flash").strip()
+WIFE_GEMINI_MODEL = os.getenv("WIFE_GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 _raw_meal_times = os.getenv("WIFE_MEAL_REMINDER_TIMES", "").strip()
 WIFE_MEAL_REMINDER_TIMES: List[str] = []

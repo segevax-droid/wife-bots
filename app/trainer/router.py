@@ -68,8 +68,8 @@ def _scale_val(data: str) -> int:
     return int(data.rsplit("_", 1)[-1])
 
 
-@trainer_router.message(Command("start"), StateFilter(None))
-@trainer_router.message(Command("menu"), StateFilter(None))
+@trainer_router.message(Command("start"))
+@trainer_router.message(Command("menu"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Тренер. Меню:", reply_markup=trainer_main_kb())

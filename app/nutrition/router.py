@@ -94,8 +94,8 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
     await message.answer(f"Записано: {staple} {grams:.0f}г (~{m['kcal'] * grams / 100:.0f} ккал).")
 
 
-@nutrition_router.message(Command("start"), StateFilter(None))
-@nutrition_router.message(Command("menu"), StateFilter(None))
+@nutrition_router.message(Command("start"))
+@nutrition_router.message(Command("menu"))
 async def nut_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Нутрициолог. Проверяю профиль…")
