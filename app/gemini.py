@@ -16,10 +16,11 @@ logger = logging.getLogger("wife_bots")
 GEMINI_MODEL = WIFE_GEMINI_MODEL
 _FALLBACK_MODELS = [
     WIFE_GEMINI_MODEL,
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-flash-latest",
-    "gemini-1.5-flash",
 ]
 
 
