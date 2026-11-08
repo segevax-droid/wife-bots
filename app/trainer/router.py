@@ -232,19 +232,18 @@ def _scale_val(data: str) -> int:
 
 
 def _pick_analog_triplet(pool: List[Dict[str, Any]], exclude: set, current_id: str) -> List[Dict[str, Any]]:
-    shuffled = list(pool)
-    random.shuffle(shuffled)
-    picked: List[Dict[str, Any]] = []
-    for c in shuffled:
-        cid = c["id"]
-        if cid == current_id or cid in exclude:
-            continue
-        picked.append(c)
-        if len(picked) >= 3:
-            break
+    """Sample 3 from a muscle-group-ranked pool; shuffle only among the top candidates."""
+    eligible = [c for c in pool if c["id"] != current_id and c["id"] not in exclude]
+    if not eligible:
+        eligible = [c for c in pool if c["id"] != current_id]
+    # Pool is already ranked by group relevance — diversify within the head, not the whole list.
+    head = eligible[: max(9, min(len(eligible), 12))]
+    random.shuffle(head)
+    picked = head[:3]
     if len(picked) < 3:
-        for c in shuffled:
-            if c["id"] == current_id or c in picked:
+        seen = {c["id"] for c in picked}
+        for c in eligible:
+            if c["id"] in seen:
                 continue
             picked.append(c)
             if len(picked) >= 3:

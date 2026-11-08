@@ -6,59 +6,9 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.state import SYSTEM_STATE
-from app.trainer.exercise_db import ExerciseDB
+from app.trainer.exercise_db import ExerciseDB, canonical_group
 
 FB_GROUP_ORDER = ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Пресс", "Ягодицы")
-
-# Sheet group labels vary; match by substring, then by exercise name.
-_GROUP_KEYS: List[Tuple[str, str]] = [
-    ("ягодиц", "Ягодицы"),
-    ("бицепс бедра", "Ноги"),
-    ("задн", "Ноги"),
-    ("квадр", "Ноги"),
-    ("икр", "Ноги"),
-    ("голен", "Ноги"),
-    ("ног", "Ноги"),
-    ("спин", "Спина"),
-    ("широк", "Спина"),
-    ("трапец", "Спина"),
-    ("грудь", "Грудь"),
-    ("грудн", "Грудь"),
-    ("пектор", "Грудь"),
-    ("плеч", "Плечи"),
-    ("делт", "Плечи"),
-    ("трицепс", "Руки"),
-    ("бицепс", "Руки"),
-    ("рук", "Руки"),
-    ("пресс", "Пресс"),
-    ("кор", "Кор"),
-    ("core", "Кор"),
-]
-
-_NAME_KEYS: List[Tuple[tuple, str]] = [
-    (("ягодичн", "hip thrust", "glute"), "Ягодицы"),
-    (("присед", "выпад", "жим ногами", "разгибан", "сгибан ног", "румынск", "становая", "икры", "голен"), "Ноги"),
-    (("подтяг", "тяга", "гиперэкстенз", "лицфейс", "пульдаун", "pull"), "Спина"),
-    (("жим лёж", "жим лежа", "отжим", "сведен", "пуловер", "бабочка", "pec"), "Грудь"),
-    (("жим стоя", "жим сидя", "махи", "разведен", "арнольд"), "Плечи"),
-    (("бицепс", "трицепс", "молот", "французск", "сгибан рук"), "Руки"),
-    (("скручиван", "планка", "пресс", "crunch"), "Пресс"),
-]
-
-
-def canonical_group(ex: Dict[str, Any]) -> str:
-    raw = (ex.get("group") or "").strip().lower()
-    name = (ex.get("name") or "").strip().lower()
-    for key, g in _GROUP_KEYS:
-        if key in raw:
-            return g
-    for keys, g in _NAME_KEYS:
-        if any(k in name for k in keys):
-            return g
-    for key, g in _GROUP_KEYS:
-        if key in name:
-            return g
-    return (ex.get("group") or "").strip() or "Прочее"
 
 
 def _is_placeholder_name(name: str) -> bool:

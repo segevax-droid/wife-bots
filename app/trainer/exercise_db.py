@@ -6,9 +6,67 @@ from app.sheets import get_worksheet, get_ws_values
 
 _SHEET_CANDIDATES = ("Список упражнений", "Упражнения")
 
+# Sheet group labels vary; match by substring, then by exercise name.
+_GROUP_KEYS: List[Tuple[str, str]] = [
+    ("ягодиц", "Ягодицы"),
+    ("бицепс бедра", "Ноги"),
+    ("задн", "Ноги"),
+    ("квадр", "Ноги"),
+    ("икр", "Ноги"),
+    ("голен", "Ноги"),
+    ("ног", "Ноги"),
+    ("спин", "Спина"),
+    ("широк", "Спина"),
+    ("трапец", "Спина"),
+    ("грудь", "Грудь"),
+    ("грудн", "Грудь"),
+    ("пектор", "Грудь"),
+    ("плеч", "Плечи"),
+    ("делт", "Плечи"),
+    ("трицепс", "Руки"),
+    ("бицепс", "Руки"),
+    ("рук", "Руки"),
+    ("пресс", "Пресс"),
+    ("кор", "Кор"),
+    ("core", "Кор"),
+]
+
+_NAME_KEYS: List[Tuple[tuple, str]] = [
+    (("ягодичн", "hip thrust", "glute"), "Ягодицы"),
+    (("присед", "выпад", "жим ногами", "разгибан", "сгибан ног", "румынск", "становая", "икры", "голен"), "Ноги"),
+    (("подтяг", "тяга", "гиперэкстенз", "лицфейс", "пульдаун", "pull"), "Спина"),
+    (("жим лёж", "жим лежа", "отжим", "сведен", "пуловер", "бабочка", "pec"), "Грудь"),
+    (("жим стоя", "жим сидя", "махи", "разведен", "арнольд"), "Плечи"),
+    (("бицепс", "трицепс", "молот", "французск", "сгибан рук"), "Руки"),
+    (("скручиван", "планка", "пресс", "crunch"), "Пресс"),
+]
+
+# Adjacent muscle groups allowed as secondary analogues (never equipment).
+_RELATED_GROUPS = {
+    "Ноги": frozenset({"Ягодицы"}),
+    "Ягодицы": frozenset({"Ноги"}),
+    "Кор": frozenset({"Пресс"}),
+    "Пресс": frozenset({"Кор"}),
+}
+
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower().strip())
+
+
+def canonical_group(ex: Dict[str, Any]) -> str:
+    raw = (ex.get("group") or "").strip().lower()
+    name = (ex.get("name") or "").strip().lower()
+    for key, g in _GROUP_KEYS:
+        if key in raw:
+            return g
+    for keys, g in _NAME_KEYS:
+        if any(k in name for k in keys):
+            return g
+    for key, g in _GROUP_KEYS:
+        if key in name:
+            return g
+    return (ex.get("group") or "").strip() or "Прочее"
 
 
 def _col_map(header: List[str]) -> Dict[str, int]:
@@ -107,25 +165,40 @@ class ExerciseDB:
         return [x[1] for x in scored[:n]]
 
     def analogues(self, ex: Dict[str, Any], limit: int = 3) -> List[Dict[str, Any]]:
-        g, eq, t = ex.get("group"), ex.get("equipment"), ex.get("type")
-        pool: List[Dict[str, Any]] = []
+        """Pick substitutes by muscle group (canonical), not by equipment.
+
+        Same group first; related groups (e.g. Ноги↔Ягодицы) only if needed.
+        Same gear is a weak rank boost inside a group, never a pool filter.
+        """
+        base_g = canonical_group(ex)
+        related = _RELATED_GROUPS.get(base_g, frozenset())
+        base_name = _norm(ex.get("name") or "")
+        base_eq = _norm(ex.get("equipment") or "")
+
+        primary: List[Tuple[float, Dict[str, Any]]] = []
+        secondary: List[Tuple[float, Dict[str, Any]]] = []
         for other in self.by_id.values():
             if other["id"] == ex["id"]:
                 continue
-            if g and other.get("group") == g:
-                pool.append(other)
-        if len(pool) < 6 and eq:
-            for other in self.by_id.values():
-                if other["id"] == ex["id"] or other in pool:
-                    continue
-                if other.get("equipment") == eq:
-                    pool.append(other)
-        if len(pool) < 6 and t:
-            for other in self.by_id.values():
-                if other["id"] == ex["id"] or other in pool:
-                    continue
-                if other.get("type") == t:
-                    pool.append(other)
+            og = canonical_group(other)
+            if og == base_g:
+                tier = primary
+            elif og in related:
+                tier = secondary
+            else:
+                continue
+            name = _norm(other.get("name") or "")
+            score = SequenceMatcher(None, base_name, name).ratio()
+            # Soft preference for familiar equipment inside the same muscle group.
+            if base_eq and _norm(other.get("equipment") or "") == base_eq:
+                score += 0.08
+            if re.search(r"упражнение\s+\d+", other.get("name") or "", re.I):
+                score -= 0.5
+            tier.append((score, other))
+
+        primary.sort(key=lambda x: -x[0])
+        secondary.sort(key=lambda x: -x[0])
+        pool = [x[1] for x in primary] + [x[1] for x in secondary]
         return pool[: max(limit, 30)]
 
     _TIMED_NAME_PARTS = (
