@@ -5,6 +5,10 @@ from typing import Any, Dict, List, Optional
 
 from app.gemini import call_gemini
 from app.trainer.exercise_db import ExerciseDB
+from app.trainer.program import (
+    build_cycle,
+    resolve_today_from_cycle,
+)
 
 
 def _map_exercises(data: dict, db: ExerciseDB) -> List[Dict[str, Any]]:
@@ -133,37 +137,38 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
     }
 
 
-async def generate_workout_plan(db: ExerciseDB, hint: str = "") -> Dict[str, Any]:
-    """AI builds a full-body plan; names must come from the provided catalog only."""
-    catalog = []
-    for ex in db.real_named()[:50]:
-        catalog.append({"id": ex["id"], "name": ex["name"], "group": ex.get("group", "")})
-    prompt = (
-        "Ты дружелюбный тренер. Составь план на 1 тренировку (5–8 упражнений) ТОЛЬКО из каталога. "
-        "Бери точные name из каталога, без «упражнение 1/2». "
-        "Только JSON без markdown: "
-        '{"title":"...","warmup_note":"2-3 предложения","coach_note":"мотивация и логика",'
-        '"exercises":[{"name":"...","sets":3,"reps_target":10,"weight_kg":null}]}. '
-        f"Подсказка: {hint or 'общее развитие силы'}. "
-        f"Каталог: {json.dumps(catalog, ensure_ascii=False)[:4000]}"
-    )
-    raw = await call_gemini(prompt)
-    if not (raw.startswith("⚠️") or raw.startswith("⏳")):
-        data = _parse_json_obj(raw)
-        mapped = _map_exercises(data, db) if data else []
-        if mapped:
-            out: Dict[str, Any] = {"exercises": mapped}
-            for k in ("title", "warmup_note", "coach_note"):
-                if data.get(k):
-                    out[k] = str(data[k]).strip()
-            if not out.get("coach_note"):
-                out.update(await _coach_fields_for_plan(mapped, hint))
-            return out
-    local = _local_fullbody_plan(db)
-    if local["exercises"]:
-        local["note"] = "Gemini недоступен — собран базовый план из базы упражнений."
-        return local
-    return {"exercises": [], "error": raw if raw.startswith("⚠️") else "пустой каталог упражнений"}
+async def generate_workout_plan(
+    db: ExerciseDB,
+    scheme: str = "full_body",
+    *,
+    soft_session: bool = False,
+) -> Dict[str, Any]:
+    """Сборка дня из каталога по сплиту; Gemini — только заголовок и тон."""
+    cycle = build_cycle(db, scheme, soft_session=soft_session)
+    day = resolve_today_from_cycle(cycle)
+    if not day or not day.get("exercises"):
+        local = _local_fullbody_plan(db)
+        if local["exercises"]:
+            local["note"] = "Мало упражнений в базе — упрощённый план."
+            local["scheme"] = scheme
+            local["split"] = "full"
+            local["day_key"] = "FB"
+            return local
+        return {"exercises": [], "error": "пустой каталог упражнений"}
+    mapped = day["exercises"]
+    extra = await _coach_fields_for_plan(mapped, f"{scheme} {day.get('split', '')}")
+    if extra.get("title"):
+        day["title"] = extra["title"]
+    if extra.get("warmup_note"):
+        day["warmup_note"] = extra["warmup_note"]
+    if extra.get("coach_note"):
+        day["coach_note"] = extra["coach_note"]
+    day["cycle"] = cycle
+    return day
+
+
+async def generate_workout_plan_legacy(db: ExerciseDB) -> Dict[str, Any]:
+    return await generate_workout_plan(db, "full_body")
 
 
 def plan_to_state(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,7 +176,16 @@ def plan_to_state(plan: Dict[str, Any]) -> Dict[str, Any]:
         "plan_id": str(uuid.uuid4())[:8],
         "exercises": plan.get("exercises", []),
     }
-    for k in ("title", "warmup_note", "coach_note", "note"):
+    for k in (
+        "title",
+        "warmup_note",
+        "coach_note",
+        "note",
+        "split",
+        "day_key",
+        "scheme",
+        "warmup",
+    ):
         if plan.get(k):
             st[k] = plan[k]
     return st

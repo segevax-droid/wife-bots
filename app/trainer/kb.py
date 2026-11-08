@@ -32,7 +32,75 @@ def plan_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✨ Составить план ИИ", callback_data="tr_gen_plan")],
             [InlineKeyboardButton(text="📎 Последний план", callback_data="tr_last_plan")],
+            [InlineKeyboardButton(text="⭐ Любимые", callback_data="tr_fav_menu")],
             [InlineKeyboardButton(text="« Меню", callback_data="tr_main")],
+        ]
+    )
+
+
+def scheme_pick_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧍 Full body", callback_data="tr_scheme:full_body")],
+            [InlineKeyboardButton(text="⬆️⬇️ Верх / низ", callback_data="tr_scheme:upper_lower")],
+            _back_row("tr_plan_menu"),
+        ]
+    )
+
+
+def warmup_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ К упражнениям", callback_data="tr_warmup_done")],
+            [InlineKeyboardButton(text="⏭ Пропустить", callback_data="tr_warmup_skip")],
+            [InlineKeyboardButton(text="🛑 Прервать", callback_data="tr_abort")],
+        ]
+    )
+
+
+def pick_next_kb(pending_indices: List[int], session: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if pending_indices:
+        head = session[pending_indices[0]]
+        sets = head.get("target_sets") or head.get("sets", 3)
+        reps = head.get("reps_target", 10)
+        label = f"✅ {head['name'][:22]} {sets}×{reps}"
+        rows.append([InlineKeyboardButton(text=label, callback_data="tr_nx:0")])
+    for q, si in enumerate(pending_indices[1:6], start=1):
+        ex = session[si]
+        rows.append(
+            [InlineKeyboardButton(text=ex["name"][:36], callback_data=f"tr_nx:{q}")]
+        )
+    ctrl = [
+        InlineKeyboardButton(text="⏭ Занят", callback_data="tr_nx_skip"),
+        InlineKeyboardButton(text="🔄 Аналоги", callback_data="tr_nx_anlg"),
+    ]
+    rows.append(ctrl)
+    rows.append(
+        [
+            InlineKeyboardButton(text="🏁 Завершить", callback_data="tr_nx_end"),
+            InlineKeyboardButton(text="🛑 Прервать", callback_data="tr_abort"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def favorites_menu_kb(items: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"✕ {x.get('name', '')[:30]}", callback_data=f"tr_fav_rm:{x['id']}")]
+        for x in items[:12]
+    ]
+    rows.append(_back_row("tr_plan_menu"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def post_ex_fav_kb(ex_idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⭐ В любимые", callback_data=f"tr_fav_post:{ex_idx}:1"),
+                InlineKeyboardButton(text="Дальше", callback_data=f"tr_fav_post:{ex_idx}:0"),
+            ],
         ]
     )
 
@@ -69,21 +137,35 @@ def swap_plan_kb(ex_idx: int, exercises: List[Dict[str, Any]]) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def session_exercise_kb(ex_idx: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⏭ Пропуск", callback_data=f"tr_skip_set:{ex_idx}"),
-                InlineKeyboardButton(text="✅ Готово", callback_data=f"tr_finish_ex:{ex_idx}"),
-            ],
-            [
-                InlineKeyboardButton(text="🔀 Из плана", callback_data=f"tr_swap:{ex_idx}"),
-                InlineKeyboardButton(text="🔄 Аналоги", callback_data=f"tr_analog:{ex_idx}"),
-            ],
-            [InlineKeyboardButton(text="📖 Техника", callback_data=f"tr_tech:{ex_idx}")],
-            [InlineKeyboardButton(text="🛑 Прервать", callback_data="tr_abort")],
-        ]
-    )
+def swap_pending_kb(ex_idx: int, pending_indices: List[int], session: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows = []
+    for si in pending_indices:
+        if si == ex_idx:
+            continue
+        ex = session[si]
+        rows.append(
+            [InlineKeyboardButton(text=ex["name"][:34], callback_data=f"tr_pick_swap_idx:{si}")]
+        )
+    rows.append(_back_row(f"tr_back_ex:{ex_idx}"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def session_exercise_kb(ex_idx: int, *, is_fav: bool = False, sets_empty: bool = True) -> InlineKeyboardMarkup:
+    fav_label = "★ Убрать" if is_fav else "★ Любимое"
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="⏭ Пропуск", callback_data=f"tr_skip_set:{ex_idx}"),
+            InlineKeyboardButton(text="✅ Готово", callback_data=f"tr_finish_ex:{ex_idx}"),
+        ],
+    ]
+    row2 = [InlineKeyboardButton(text="🔄 Аналоги", callback_data=f"tr_analog:{ex_idx}")]
+    if sets_empty:
+        row2.insert(0, InlineKeyboardButton(text="🔀 Из очереди", callback_data=f"tr_swap:{ex_idx}"))
+    rows.append(row2)
+    rows.append([InlineKeyboardButton(text=fav_label, callback_data=f"tr_fav_toggle:{ex_idx}")])
+    rows.append([InlineKeyboardButton(text="📖 Техника", callback_data=f"tr_tech:{ex_idx}")])
+    rows.append([InlineKeyboardButton(text="🛑 Прервать", callback_data="tr_abort")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def scale_1_10(prefix: str, back_cb: Optional[str] = None) -> InlineKeyboardMarkup:
