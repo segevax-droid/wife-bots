@@ -148,7 +148,7 @@ def format_today_session(meta: Dict[str, Any], note: str = "") -> str:
         lines.append("")
         lines.append(note)
     lines.append("")
-    lines.append("Жми «Поехали!» — сначала чек-ин, потом разминка.")
+    lines.append("Жми «Поехали!» — дальше разминка и упражнения.")
     return "\n".join(lines)
 
 
@@ -199,7 +199,7 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
                 f"  • {star}{_h(ex['name'])} — <b>{format_volume(ex)}</b>{wpart}"
             )
         lines.append("")
-    lines.append("<i>Готова? «Старт тренировки» → чек-ин → «Начать».</i>")
+    lines.append("<i>Готова? «Старт тренировки» → «Поехали!».</i>")
     return "\n".join(lines).strip()
 
 

@@ -7,13 +7,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from aiogram import Bot, F, Router, types
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.common import record_user_chat, send_cross_notification
-from app.config import BONUS_CARB_FRAC
+from app.config import BONUS_CARB_FRAC, WIFE_NUTRITION_TOKEN
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.sheets import append_row_to_sheet, get_settings_map, set_setting
 from app.state import SYSTEM_STATE, now_local, save_state_pairs
@@ -62,8 +64,6 @@ from app.trainer.progression import next_load_hint
 from app.trainer.reminders import handle_light_home
 from app.trainer.reports import compare_last_session, report_vs_avg_four_weeks, week_month_top_moves
 from app.trainer.ux import (
-    checkin_nudge,
-    checkin_question,
     exercise_card,
     format_favorites_list,
     format_picker_message,
@@ -72,7 +72,6 @@ from app.trainer.ux import (
     format_today_session,
     format_warmup_card,
     parse_error_friendly,
-    pre_begin_message,
     is_timed_ex,
     praise_after_set,
     rest_ping_message,
@@ -88,13 +87,20 @@ class TrOnboard(StatesGroup):
 
 
 class TrSession(StatesGroup):
-    check_cns = State()
-    check_joint = State()
-    check_psy = State()
     in_workout = State()
-    checkout_cns = State()
-    checkout_joint = State()
-    checkout_ctrl = State()
+
+
+_nutrition_bot: Optional[Bot] = None
+
+
+def _peer_nutrition_bot() -> Bot:
+    global _nutrition_bot
+    if _nutrition_bot is None:
+        _nutrition_bot = Bot(
+            WIFE_NUTRITION_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+    return _nutrition_bot
 
 
 async def _train_freq() -> int:
@@ -319,11 +325,6 @@ async def cb_main(call: types.CallbackQuery, state: FSMContext):
 
 @trainer_router.callback_query(F.data == "tr_resume")
 async def cb_resume(call: types.CallbackQuery, state: FSMContext):
-    cur = await state.get_state()
-    if cur and "checkout" in str(cur):
-        await _goto_checkout(call.message, state)
-        await call.answer()
-        return
     await state.set_state(TrSession.in_workout)
     await _show_exercise(call.message, state)
     await call.answer()
@@ -423,68 +424,6 @@ async def cb_go(call: types.CallbackQuery, state: FSMContext):
     if not data.get("pending_session"):
         await cb_start_flow(call, state)
         return
-    await state.set_state(TrSession.check_cns)
-    await call.message.answer(
-        checkin_question("cns"),
-        reply_markup=scale_1_10("tr_pre_cns", "tr_main"),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_pre_back:"))
-async def cb_pre_back(call: types.CallbackQuery, state: FSMContext):
-    step = call.data.split(":")[-1]
-    if step == "cns":
-        await state.set_state(TrSession.check_cns)
-        await call.message.answer(
-            checkin_question("cns"),
-            reply_markup=scale_1_10("tr_pre_cns", "tr_main"),
-        )
-    elif step == "joint":
-        await state.set_state(TrSession.check_joint)
-        await call.message.answer(checkin_question("joint"), reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"))
-    elif step == "psy":
-        await state.set_state(TrSession.check_psy)
-        await call.message.answer(checkin_question("psy"), reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"))
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_pre_cns_"))
-async def cb_pre_cns(call: types.CallbackQuery, state: FSMContext):
-    val = _scale_val(call.data)
-    await state.update_data(pre_cns=val)
-    nudge = checkin_nudge("cns", val)
-    await state.set_state(TrSession.check_joint)
-    await call.message.answer(
-        (nudge + "\n\n" if nudge else "") + checkin_question("joint"),
-        reply_markup=scale_1_10("tr_pre_joint", "tr_pre_back:cns"),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_pre_joint_"))
-async def cb_pre_joint(call: types.CallbackQuery, state: FSMContext):
-    val = _scale_val(call.data)
-    await state.update_data(pre_joint=val)
-    nudge = checkin_nudge("joint", val)
-    await state.set_state(TrSession.check_psy)
-    await call.message.answer(
-        (nudge + "\n\n" if nudge else "") + checkin_question("psy"),
-        reply_markup=scale_1_10("tr_pre_psy", "tr_pre_back:joint"),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_pre_psy_"))
-async def cb_pre_psy(call: types.CallbackQuery, state: FSMContext):
-    val = _scale_val(call.data)
-    await state.update_data(pre_psy=val)
-    data = await state.get_data()
-    nudge = checkin_nudge("psy", val)
-    body = pre_begin_message(int(data.get("pre_cns", 5)), int(data.get("pre_joint", 5)), val)
-    if nudge:
-        body = nudge + "\n\n" + body
-    await call.message.answer(body)
     await _begin_session(call.message, state)
     await call.answer()
 
@@ -501,7 +440,7 @@ async def _show_picker(message: types.Message, state: FSMContext) -> None:
     pending: List[int] = list(data.get("pending_indices") or [])
     done = int(data.get("completed_count") or 0)
     if not pending:
-        await _goto_checkout(message, state)
+        await _finish_session(message, state)
         return
     await state.update_data(cur_idx=-1)
     await message.answer(
@@ -596,10 +535,6 @@ async def cb_warmup_done(call: types.CallbackQuery, state: FSMContext):
 
 @trainer_router.callback_query(F.data == "tr_warmup_skip")
 async def cb_warmup_skip(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if int(data.get("pre_joint", 8)) <= 4:
-        await call.answer("Суставы просили разминку — хотя бы 2–3 минуты 🫧", show_alert=True)
-        return
     await state.update_data(warmup_done=True)
     await _show_picker(call.message, state)
     await call.answer()
@@ -653,7 +588,7 @@ async def cb_nx_anlg(call: types.CallbackQuery, state: FSMContext):
 @trainer_router.callback_query(F.data == "tr_nx_end")
 async def cb_nx_end(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
-    await _goto_checkout(call.message, state)
+    await _finish_session(call.message, state)
 
 
 async def _show_exercise(message: types.Message, state: FSMContext):
@@ -667,7 +602,7 @@ async def _show_exercise(message: types.Message, state: FSMContext):
         return
     sess: List[Dict[str, Any]] = data.get("session", [])
     if idx >= len(sess):
-        await _goto_checkout(message, state)
+        await _finish_session(message, state)
         return
     pending = data.get("pending_indices") or []
     done = int(data.get("completed_count") or 0)
@@ -1097,63 +1032,16 @@ async def cb_abort(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-async def _goto_checkout(message: types.Message, state: FSMContext):
-    await state.set_state(TrSession.checkout_cns)
+async def _finish_session(
+    message: types.Message,
+    state: FSMContext,
+    bot_trainer: Optional[Bot] = None,
+    bot_nutrition: Optional[Bot] = None,
+) -> None:
+    bot_trainer = bot_trainer or message.bot
+    bot_nutrition = bot_nutrition or _peer_nutrition_bot()
     data = await state.get_data()
-    sess = data.get("session") or []
-    back = f"tr_back_ex:{max(0, len(sess) - 1)}" if sess else None
-    await message.answer(
-        checkin_question("post_cns"),
-        reply_markup=scale_1_10("tr_post_cns", back),
-    )
-
-
-@trainer_router.callback_query(F.data.startswith("tr_post_back:"))
-async def cb_post_back(call: types.CallbackQuery, state: FSMContext):
-    step = call.data.split(":")[-1]
-    if step == "joint":
-        await state.set_state(TrSession.checkout_joint)
-        await call.message.answer(
-            checkin_question("post_joint"),
-            reply_markup=scale_1_10("tr_post_joint", "tr_post_back:cns"),
-        )
-    else:
-        await state.set_state(TrSession.checkout_cns)
-        data = await state.get_data()
-        sess = data.get("session") or []
-        back = f"tr_back_ex:{max(0, len(sess) - 1)}" if sess else None
-        await call.message.answer(
-            checkin_question("post_cns"),
-            reply_markup=scale_1_10("tr_post_cns", back),
-        )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_post_cns_"))
-async def cb_post_cns(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(post_cns=_scale_val(call.data))
-    await state.set_state(TrSession.checkout_joint)
-    await call.message.answer(checkin_question("post_joint"), reply_markup=scale_1_10("tr_post_joint", "tr_post_back:cns"))
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_post_joint_"))
-async def cb_post_joint(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(post_joint=_scale_val(call.data))
-    await state.set_state(TrSession.checkout_ctrl)
-    await call.message.answer(
-        checkin_question("post_ctrl"),
-        reply_markup=scale_1_10("tr_post_ctrl", "tr_post_back:joint"),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_post_ctrl_"))
-async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer: Bot, bot_nutrition: Bot):
-    data = await state.get_data()
-    post_j = int(data.get("post_joint", 5))
-    pain = post_j <= 3
-    await state.update_data(post_ctrl=_scale_val(call.data), pain=pain)
+    pain = False
     sess = data.get("session", [])
     fin = []
     tons_total = 0.0
@@ -1266,12 +1154,11 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
         bot_nutrition,
     )
     cmp1 = await report_vs_avg_four_weeks({"exercises": fin})
-    await call.message.answer(
+    await message.answer(
         f"🎉 <b>Тренировка в копилке!</b>\n\n{summary}\n\n📊 {cmp1}",
         reply_markup=trainer_main_kb(),
     )
     await state.clear()
-    await call.answer()
 
 
 @trainer_router.callback_query(F.data == "tr_rm_plan")
