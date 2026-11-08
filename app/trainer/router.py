@@ -17,37 +17,20 @@ from app.config import BONUS_CARB_FRAC
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.sheets import append_row_to_sheet, get_settings_map
 from app.state import SYSTEM_STATE, now_local, save_state_pairs
-from app.trainer.favorites import (
-    favorite_ids_list,
-    is_favorite,
-    remove_favorite,
-    toggle_favorite,
-)
-from app.trainer.program import (
-    HISTORY_KEY,
-    append_history_entry,
-    advance_cycle_cursor,
-)
 from app.trainer.calendar_png import current_month_tonnage_map, month_png_bytes
 from app.trainer.energy import estimate_session_kcal
 from app.trainer.exercise_db import ExerciseDB
 from app.trainer.kb import (
     analogues_pick_kb,
-    favorites_menu_kb,
-    pick_next_kb,
     plan_menu_kb,
-    post_ex_fav_kb,
     pre_begin_kb,
     rest_kb,
     scale_1_10,
     scale_set_difficulty_kb,
-    scheme_pick_kb,
     session_exercise_kb,
-    swap_pending_kb,
     swap_plan_kb,
     tech_close_kb,
     trainer_main_kb,
-    warmup_kb,
 )
 from app.trainer.plan_parse import generate_workout_plan, parse_workout_plan, plan_to_state
 from app.trainer.progression import next_load_hint
@@ -57,11 +40,8 @@ from app.trainer.ux import (
     checkin_nudge,
     checkin_question,
     exercise_card,
-    format_favorites_list,
-    format_picker_message,
     format_plan_message,
     format_technique_message,
-    format_warmup_card,
     parse_error_friendly,
     pre_begin_message,
     praise_after_set,
@@ -173,7 +153,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
         "Привет! Я твой тренер 💪\n\n"
         "🏋️ <b>Старт</b> — чек-ин, подбадривания и подходы в живом темпе\n"
-        "📋 <b>План</b> — сплит (full / верх-низ), разминка, выбор упражнений кнопками\n"
+        "📋 <b>План</b> — ИИ соберёт тренировку с разминкой и пояснениями\n"
         "📊 <b>Отчёты и календарь</b> — прогресс без скуки\n"
         "🔧 <b>Техника</b> на каждом упражнении — кнопкой или голосом <code>40×10</code>\n\n"
         "С чего начнём?",
@@ -228,23 +208,13 @@ async def cb_plan_menu(call: types.CallbackQuery):
 
 @trainer_router.callback_query(F.data == "tr_gen_plan")
 async def cb_gen_plan(call: types.CallbackQuery):
-    await call.message.answer(
-        "🧠 <b>Схема на неделю</b>\nВыбери сплит — соберу день с учётом базы и любимых ★",
-        reply_markup=scheme_pick_kb(),
-    )
     await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_scheme:"))
-async def cb_scheme(call: types.CallbackQuery):
-    scheme = call.data.split(":")[-1]
-    await call.answer()
-    await call.message.answer("Собираю план из базы — порядок, разминка, ротация…")
+    await call.message.answer("🧠 Собираю план из твоей базы — минутку, продумываю порядок и разминку…")
     db = await ExerciseDB.load()
     if not db.by_id:
         await call.message.answer("В таблице нет упражнений. Заполни лист «Список упражнений».")
         return
-    plan = await generate_workout_plan(db, scheme)
+    plan = await generate_workout_plan(db)
     if plan.get("error"):
         await call.message.answer(str(plan["error"]))
         return
@@ -263,12 +233,8 @@ async def ingest_long_plan(message: types.Message):
 
 
 async def _save_plan(message: types.Message, plan: dict) -> None:
-    cycle = plan.pop("cycle", None)
     st = plan_to_state(plan)
-    pairs: Dict[str, str] = {"plan_last_json": json.dumps(st, ensure_ascii=False)}
-    if cycle:
-        pairs["plan_cycle_json"] = json.dumps(cycle, ensure_ascii=False)
-    await save_state_pairs(pairs)
+    await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
     await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
     db = await ExerciseDB.load()
     await message.answer(format_plan_message(plan if plan.get("title") else {**plan, **st}, db), reply_markup=trainer_main_kb())
@@ -410,36 +376,6 @@ async def cb_pre_psy(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-async def _show_warmup(message: types.Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    plan = data.get("plan") or {}
-    await message.answer(format_warmup_card(plan), reply_markup=warmup_kb())
-
-
-async def _show_picker(message: types.Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    sess: List[Dict[str, Any]] = data.get("session") or []
-    pending: List[int] = list(data.get("pending_indices") or [])
-    done = int(data.get("completed_count") or 0)
-    if not pending:
-        await _goto_checkout(message, state)
-        return
-    await state.update_data(cur_idx=-1)
-    await message.answer(
-        format_picker_message(sess, pending, done),
-        reply_markup=pick_next_kb(pending, sess),
-    )
-
-
-async def _kb_for_exercise(state: FSMContext, ex_idx: int) -> InlineKeyboardMarkup:
-    data = await state.get_data()
-    sess = data.get("session") or []
-    ex = sess[ex_idx] if ex_idx < len(sess) else {}
-    empty = not (ex.get("sets") or [])
-    fav = is_favorite(str(ex.get("exercise_id", "")))
-    return session_exercise_kb(ex_idx, is_fav=fav, sets_empty=empty)
-
-
 @trainer_router.callback_query(F.data == "tr_begin_session")
 async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
     raw = SYSTEM_STATE.get("plan_last_json")
@@ -469,123 +405,31 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
                 "weight_kg_plan": ex.get("weight_kg"),
             }
         )
-    pending = list(range(len(sess)))
-    await state.update_data(
-        started_at=started,
-        plan=plan,
-        session=sess,
-        cur_idx=-1,
-        pending_indices=pending,
-        warmup_done=False,
-        completed_count=0,
-        await_baseline=False,
-    )
+    await state.update_data(started_at=started, plan=plan, session=sess, cur_idx=0, await_baseline=False)
     await state.set_state(TrSession.in_workout)
     await call.message.answer(session_kickoff(len(sess), plan))
-    await _show_warmup(call.message, state)
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data == "tr_warmup_done")
-async def cb_warmup_done(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(warmup_done=True)
-    await _show_picker(call.message, state)
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data == "tr_warmup_skip")
-async def cb_warmup_skip(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if int(data.get("pre_joint", 8)) <= 4:
-        await call.answer("Суставы просили разминку — хотя бы 2–3 минуты 🫧", show_alert=True)
-        return
-    await state.update_data(warmup_done=True)
-    await _show_picker(call.message, state)
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_nx:"))
-async def cb_pick_next(call: types.CallbackQuery, state: FSMContext):
-    q = int(call.data.split(":")[-1])
-    data = await state.get_data()
-    pending = list(data.get("pending_indices") or [])
-    if q < 0 or q >= len(pending):
-        await call.answer("Список обновился — открой меню снова", show_alert=True)
-        return
-    si = pending.pop(q)
-    await state.update_data(pending_indices=pending, cur_idx=si)
     await _show_exercise(call.message, state)
     await call.answer()
 
 
-@trainer_router.callback_query(F.data == "tr_nx_skip")
-async def cb_nx_skip(call: types.CallbackQuery, state: FSMContext):
-    pending = list((await state.get_data()).get("pending_indices") or [])
-    if len(pending) > 1:
-        pending.append(pending.pop(0))
-        await state.update_data(pending_indices=pending)
-    data = await state.get_data()
-    sess = data.get("session") or []
-    done = int(data.get("completed_count") or 0)
-    try:
-        await call.message.edit_text(
-            format_picker_message(sess, pending, done),
-            reply_markup=pick_next_kb(pending, sess),
-        )
-    except Exception:
-        await _show_picker(call.message, state)
-    await call.answer("Следующее в очереди")
-
-
-@trainer_router.callback_query(F.data == "tr_nx_anlg")
-async def cb_nx_anlg(call: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    pending = data.get("pending_indices") or []
-    if not pending:
-        await call.answer("Очередь пуста", show_alert=True)
-        return
-    idx = int(pending[0])
-    await state.update_data(cur_idx=idx)
-    await _offer_analogs(call, state, idx)
-
-
-@trainer_router.callback_query(F.data == "tr_nx_end")
-async def cb_nx_end(call: types.CallbackQuery, state: FSMContext):
-    await call.answer()
-    await _goto_checkout(call.message, state)
-
-
 async def _show_exercise(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not data.get("warmup_done"):
-        await _show_warmup(message, state)
-        return
-    idx = int(data.get("cur_idx", -1))
-    if idx < 0:
-        await _show_picker(message, state)
-        return
+    idx = int(data.get("cur_idx", 0))
     sess: List[Dict[str, Any]] = data.get("session", [])
     if idx >= len(sess):
         await _goto_checkout(message, state)
         return
-    pending = data.get("pending_indices") or []
-    done = int(data.get("completed_count") or 0)
-    total = done + len(pending) + 1
     ex = sess[idx]
     db = await ExerciseDB.load()
     base = db.by_id.get(ex.get("exercise_id", ""))
-    disp_idx = done
-    text = exercise_card(ex, disp_idx, total, base)
-    kb = await _kb_for_exercise(state, idx)
-    await message.answer(text, reply_markup=kb)
+    text = exercise_card(ex, idx, len(sess), base)
+    await message.answer(text, reply_markup=session_exercise_kb(idx))
 
 
 @trainer_router.message(TrSession.in_workout, F.text | F.voice | F.photo)
 async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    idx = int(data.get("cur_idx", -1))
-    if idx < 0:
-        return
+    idx = int(data.get("cur_idx", 0))
     sess: List[Dict[str, Any]] = data["session"]
     if idx >= len(sess):
         return
@@ -663,8 +507,11 @@ async def cb_rest(call: types.CallbackQuery, state: FSMContext):
     async def ping():
         await asyncio.sleep(sec)
         try:
-            kb = await _kb_for_exercise(state, idx)
-            await call.bot.send_message(chat, rest_ping_message(), reply_markup=kb)
+            await call.bot.send_message(
+                chat,
+                rest_ping_message(),
+                reply_markup=session_exercise_kb(idx),
+            )
         except Exception:
             pass
 
@@ -701,78 +548,14 @@ async def cb_ex_diff(call: types.CallbackQuery, state: FSMContext):
     idx = int(data.get("finish_ex_idx", data.get("cur_idx", 0)))
     sess = data["session"]
     sess[idx]["exercise_difficulty"] = d
-    completed = int(data.get("completed_count") or 0) + 1
-    await state.update_data(
-        session=sess,
-        cur_idx=-1,
-        finish_ex_idx=None,
-        completed_count=completed,
-    )
-    eid = str(sess[idx].get("exercise_id") or "")
-    if 5 <= d <= 8 and eid and not is_favorite(eid):
-        await call.message.answer(
-            f"«{sess[idx]['name']}» зашло нормально — в любимые?",
-            reply_markup=post_ex_fav_kb(idx),
-        )
-        await call.answer()
-        return
-    await _show_picker(call.message, state)
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_fav_post:"))
-async def cb_fav_post(call: types.CallbackQuery, state: FSMContext):
-    parts = call.data.split(":")
-    idx = int(parts[1])
-    yes = parts[2] == "1"
-    data = await state.get_data()
-    if yes and idx < len(data.get("session") or []):
-        eid = data["session"][idx].get("exercise_id")
-        if eid:
-            _, msg = await toggle_favorite(str(eid))
-            await call.message.answer(msg)
-    await _show_picker(call.message, state)
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_fav_toggle:"))
-async def cb_fav_toggle(call: types.CallbackQuery, state: FSMContext):
-    idx = int(call.data.split(":")[-1])
-    data = await state.get_data()
-    sess = data.get("session") or []
-    if idx >= len(sess):
-        await call.answer()
-        return
-    eid = sess[idx].get("exercise_id")
-    if not eid:
-        await call.answer("Нет id", show_alert=True)
-        return
-    _, msg = await toggle_favorite(str(eid))
-    await call.answer(msg[:180], show_alert=len(msg) > 60)
+    await state.update_data(session=sess, cur_idx=idx + 1, finish_ex_idx=None)
     await _show_exercise(call.message, state)
-
-
-@trainer_router.callback_query(F.data == "tr_fav_menu")
-async def cb_fav_menu(call: types.CallbackQuery):
-    db = await ExerciseDB.load()
-    items = []
-    for eid in favorite_ids_list():
-        ex = db.by_id.get(eid)
-        if ex:
-            items.append(ex)
-    text = format_favorites_list([(x["id"], x["name"]) for x in items])
-    await call.message.answer(text, reply_markup=favorites_menu_kb(items))
     await call.answer()
 
 
-@trainer_router.callback_query(F.data.startswith("tr_fav_rm:"))
-async def cb_fav_rm(call: types.CallbackQuery):
-    eid = call.data.split(":", 1)[1]
-    await remove_favorite(eid)
-    await cb_fav_menu(call)
-
-
-async def _offer_analogs(call: types.CallbackQuery, state: FSMContext, idx: int) -> None:
+@trainer_router.callback_query(F.data.startswith("tr_analog:"))
+async def cb_analog(call: types.CallbackQuery, state: FSMContext):
+    idx = int(call.data.split(":")[-1])
     db = await ExerciseDB.load()
     data = await state.get_data()
     ex = data["session"][idx]
@@ -782,7 +565,7 @@ async def _offer_analogs(call: types.CallbackQuery, state: FSMContext, idx: int)
         return
     pool = db.analogues(base, 40)
     if len(pool) < 1:
-        await call.answer("В базе мало похожих — выбери другое из очереди", show_alert=True)
+        await call.answer("В базе мало похожих — попробуй «Другое из плана»", show_alert=True)
         return
     excl_map: Dict[str, List[str]] = dict(data.get("analog_exclude") or {})
     exclude = set(excl_map.get(str(idx), []))
@@ -817,12 +600,6 @@ async def _offer_analogs(call: types.CallbackQuery, state: FSMContext, idx: int)
     await call.answer()
 
 
-@trainer_router.callback_query(F.data.startswith("tr_analog:"))
-async def cb_analog(call: types.CallbackQuery, state: FSMContext):
-    idx = int(call.data.split(":")[-1])
-    await _offer_analogs(call, state, idx)
-
-
 @trainer_router.callback_query(F.data.startswith("tr_anlg:"))
 async def cb_pick_analog(call: types.CallbackQuery, state: FSMContext):
     _, idx_s, slot_s = call.data.split(":", 2)
@@ -842,10 +619,7 @@ async def cb_pick_analog(call: types.CallbackQuery, state: FSMContext):
     _replace_session_ex(sess, idx, exercise_id=eid, name=picked_ex["name"], template=sess[idx])
     excl_map: Dict[str, List[str]] = dict(data.get("analog_exclude") or {})
     excl_map.pop(str(idx), None)
-    pending = list(data.get("pending_indices") or [])
-    if idx in pending:
-        pending.remove(idx)
-    await state.update_data(session=sess, cur_idx=idx, analog_exclude=excl_map, pending_indices=pending)
+    await state.update_data(session=sess, cur_idx=idx, analog_exclude=excl_map)
     try:
         await call.message.delete()
     except Exception:
@@ -891,34 +665,9 @@ async def cb_tech_close(call: types.CallbackQuery):
 async def cb_swap(call: types.CallbackQuery, state: FSMContext):
     idx = int(call.data.split(":")[-1])
     data = await state.get_data()
-    sess = data.get("session") or []
-    pending = data.get("pending_indices") or []
-    ex = sess[idx] if idx < len(sess) else {}
-    if ex.get("sets"):
-        await call.answer("Уже есть подходы — только аналоги", show_alert=True)
-        return
+    plan = data.get("plan", {}).get("exercises", [])
     await state.update_data(cur_idx=idx)
-    await call.message.answer(
-        "Другое из очереди:",
-        reply_markup=swap_pending_kb(idx, pending, sess),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_pick_swap_idx:"))
-async def cb_pick_swap_idx(call: types.CallbackQuery, state: FSMContext):
-    si = int(call.data.split(":")[-1])
-    data = await state.get_data()
-    cur = int(data.get("cur_idx", -1))
-    sess: List[Dict[str, Any]] = data["session"]
-    pending = list(data.get("pending_indices") or [])
-    if cur < 0 or cur >= len(sess) or si >= len(sess):
-        await call.answer()
-        return
-    sess[cur], sess[si] = sess[si], sess[cur]
-    pending = [si if x == cur else cur if x == si else x for x in pending]
-    await state.update_data(session=sess, pending_indices=pending)
-    await _show_exercise(call.message, state)
+    await call.message.answer("Другое из плана:", reply_markup=swap_plan_kb(idx, plan))
     await call.answer()
 
 
@@ -1085,25 +834,13 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
         json.dumps({"exercises": fin}, ensure_ascii=False),
     ]
     await append_row_to_sheet("Сессии", row)
-    plan_meta = data.get("plan") or {}
-    day_key = str(plan_meta.get("day_key") or "FB")
-    done_ids = [str(ex["exercise_id"]) for ex in sess if ex.get("exercise_id") and ex.get("sets")]
-    hist = append_history_entry(day_key, done_ids)
-    state_pairs: Dict[str, str] = {
-        "last_session_date": now_local().strftime("%Y-%m-%d"),
-        "pending_workout_bonus_kcal": str(bonus),
-        "pending_workout_bonus_date": now_local().strftime("%Y-%m-%d"),
-        HISTORY_KEY: json.dumps(hist, ensure_ascii=False),
-    }
-    try:
-        cycle_raw = SYSTEM_STATE.get("plan_cycle_json") or ""
-        if cycle_raw:
-            cycle = json.loads(cycle_raw)
-            cycle = advance_cycle_cursor(cycle, day_key)
-            state_pairs["plan_cycle_json"] = json.dumps(cycle, ensure_ascii=False)
-    except Exception:
-        pass
-    await save_state_pairs(state_pairs)
+    await save_state_pairs(
+        {
+            "last_session_date": now_local().strftime("%Y-%m-%d"),
+            "pending_workout_bonus_kcal": str(bonus),
+            "pending_workout_bonus_date": now_local().strftime("%Y-%m-%d"),
+        }
+    )
     await send_cross_notification(
         "trainer",
         f"Бонус от тренировки: +{bonus} ккал на сегодня (≈{BONUS_CARB_FRAC*100:.0f}% углеводы, остальное жиры/белок).",

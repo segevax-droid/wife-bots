@@ -3,8 +3,6 @@ import random
 from typing import Any, Dict, List, Optional
 
 from app.trainer.exercise_db import ExerciseDB
-from app.trainer.favorites import is_favorite
-from app.trainer.program import SPLIT_LABELS
 
 
 def _h(text: str) -> str:
@@ -109,13 +107,7 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
     title = _h((plan.get("title") or "Тренировка на сегодня").strip())
     coach = _h((plan.get("coach_note") or plan.get("note") or "").strip())
     warmup = _h((plan.get("warmup_note") or "").strip())
-    split = (plan.get("split") or "full").strip()
-    day_key = (plan.get("day_key") or "").strip()
-    split_lbl = SPLIT_LABELS.get(split, split)
-    sub = f"{len(exs)} упражнений · {split_lbl}"
-    if day_key:
-        sub += f" · день {day_key}"
-    lines: List[str] = [f"📋 <b>{title}</b>", f"<i>{sub}</i>", ""]
+    lines: List[str] = [f"📋 <b>{title}</b>", f"<i>{len(exs)} упражнений · full body</i>", ""]
     if coach:
         lines.append(f"💬 {coach}")
         lines.append("")
@@ -141,9 +133,8 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
         for ex in grouped[label]:
             w = ex.get("weight_kg")
             wpart = f", ориентир <b>{w:g} кг</b>" if w else ""
-            star = "★ " if is_favorite(str(ex.get("exercise_id", ""))) else ""
             lines.append(
-                f"  • {star}{_h(ex['name'])} — <b>{ex.get('sets', 3)}×{ex.get('reps_target', 10)}</b>{wpart}"
+                f"  • {_h(ex['name'])} — <b>{ex.get('sets', 3)}×{ex.get('reps_target', 10)}</b>{wpart}"
             )
         lines.append("")
     lines.append("<i>Готова? «Старт тренировки» → чек-ин → «Начать».</i>")
@@ -180,13 +171,9 @@ def exercise_card(
     meta = f" · {' · '.join(meta_parts)}" if meta_parts else ""
     em = group_emoji(grp)
     tech_line = _short_technique(base)
-    fav = is_favorite(str(ex.get("exercise_id", "")))
-    name = _h(ex["name"])
-    if fav:
-        name = f"★ {name}"
     body = [
         f"{em} <b>Упражнение {idx + 1}/{total}</b> · подход <b>{done + 1}/{tgt}</b>  [{progress}]",
-        f"<b>{name}</b>{_h(meta) if meta else ''}",
+        f"<b>{_h(ex['name'])}</b>{_h(meta) if meta else ''}",
         f"🎯 {hint}",
     ]
     if tech_line:
@@ -262,54 +249,6 @@ def parse_error_friendly() -> str:
         "Примеры: <code>60×8</code>, «60 кг 8 раз».\n"
         "Аналоги упражнения — кнопкой «Аналоги ×3», не текстом."
     )
-
-
-def format_warmup_card(plan: Dict[str, Any]) -> str:
-    wm = plan.get("warmup") or {}
-    note = _h((plan.get("warmup_note") or "").strip())
-    mins = wm.get("minutes") or 6
-    lines = [
-        f"🫧 <b>Разогрев · ~{mins} мин</b>",
-        f"<b>Кардио:</b> {_h(wm.get('cardio') or 'лёгкое кардио в разговорном темпе.')}",
-        f"<b>Суставы:</b> {_h(wm.get('mobility') or 'круговая разминка.')}",
-    ]
-    if note:
-        lines.append("")
-        lines.append(note)
-    lines.append("")
-    lines.append("<i>Когда готов(а) — жми «К упражнениям».</i>")
-    return "\n".join(lines)
-
-
-def format_picker_message(
-    session: List[Dict[str, Any]],
-    pending_indices: List[int],
-    done_count: int,
-) -> str:
-    total = done_count + len(pending_indices)
-    if not pending_indices:
-        return "Очередь пуста — можно завершить тренировку."
-    head_i = pending_indices[0]
-    head = session[head_i]
-    rec = _h(head.get("name") or "упражнение")
-    lines = [
-        f"📌 <b>Следующее</b> ({done_count + 1}/{total})",
-        f"Рекомендую: <b>{rec}</b>",
-        "",
-        "Выбери из плана кнопкой ниже или возьми рекомендацию.",
-    ]
-    return "\n".join(lines)
-
-
-def format_favorites_list(names: List[tuple]) -> str:
-    if not names:
-        return "Пока нет любимых. На карточке упражнения жми «★ В любимые»."
-    lines = ["⭐ <b>Любимые упражнения</b>", ""]
-    for eid, nm in names:
-        lines.append(f"• {_h(nm)}")
-    lines.append("")
-    lines.append("<i>В плане они встречаются чуть чаще, но не больше 1–2 за тренировку.</i>")
-    return "\n".join(lines)
 
 
 def workout_finish_prompt() -> str:
