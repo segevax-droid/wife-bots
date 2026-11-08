@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from aiogram import Bot, F, Router, types
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,7 +15,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from app.common import record_user_chat, send_cross_notification
 from app.config import BONUS_CARB_FRAC
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
-from app.sheets import append_row_to_sheet, get_settings_map
+from app.sheets import append_row_to_sheet, get_settings_map, set_setting
 from app.state import SYSTEM_STATE, now_local, save_state_pairs
 from app.trainer.favorites import (
     favorite_ids_list,
@@ -28,20 +28,19 @@ from app.trainer.program import (
     append_history_entry,
     advance_cycle_cursor,
 )
-from app.trainer.calendar_png import current_month_tonnage_map, month_png_bytes
+from app.trainer.calendar_png import month_png_bytes
 from app.trainer.energy import estimate_session_kcal
 from app.trainer.exercise_db import ExerciseDB
 from app.trainer.kb import (
     analogues_pick_kb,
     favorites_menu_kb,
     pick_next_kb,
-    plan_menu_kb,
+    onboard_freq_kb,
     post_ex_fav_kb,
-    pre_begin_kb,
+    today_go_kb,
     rest_kb,
     scale_1_10,
     scale_set_difficulty_kb,
-    scheme_pick_kb,
     session_exercise_kb,
     swap_pending_kb,
     swap_plan_kb,
@@ -49,7 +48,16 @@ from app.trainer.kb import (
     trainer_main_kb,
     warmup_kb,
 )
-from app.trainer.plan_parse import generate_workout_plan, parse_workout_plan, plan_to_state
+from app.trainer.month_plan import (
+    days_map_for_png,
+    ensure_month_plan,
+    load_month_plan,
+    mark_session_done,
+    materialize_session,
+    parse_freq,
+    pick_session_for_start,
+)
+from app.trainer.plan_parse import plan_to_state
 from app.trainer.progression import next_load_hint
 from app.trainer.reminders import handle_light_home
 from app.trainer.reports import compare_last_session, report_vs_avg_four_weeks, week_month_top_moves
@@ -61,6 +69,7 @@ from app.trainer.ux import (
     format_picker_message,
     format_plan_message,
     format_technique_message,
+    format_today_session,
     format_warmup_card,
     parse_error_friendly,
     pre_begin_message,
@@ -74,6 +83,10 @@ from app.trainer.ux import (
 trainer_router = Router(name="trainer")
 
 
+class TrOnboard(StatesGroup):
+    freq = State()
+
+
 class TrSession(StatesGroup):
     check_cns = State()
     check_joint = State()
@@ -82,6 +95,14 @@ class TrSession(StatesGroup):
     checkout_cns = State()
     checkout_joint = State()
     checkout_ctrl = State()
+
+
+async def _train_freq() -> int:
+    s = await get_settings_map()
+    raw = s.get("train_days_per_week") or SYSTEM_STATE.get("train_days_per_week")
+    if not str(raw or "").strip():
+        return 0
+    return parse_freq(raw)
 
 
 def _bonus_kcal(session_kcal: int) -> int:
@@ -247,20 +268,34 @@ def _replace_session_ex(sess: List[Dict[str, Any]], idx: int, *, exercise_id: st
     sess[idx] = row
 
 
+async def _need_onboard(message: types.Message, state: FSMContext) -> bool:
+    if await _train_freq():
+        return False
+    await state.set_state(TrOnboard.freq)
+    await message.answer(
+        "👋 Я собираю программу за тебя — тебе не нужно выбирать упражнения.\n\n"
+        "Сколько раз в неделю тренируемся? От этого зависит план на месяц "
+        "и как часто будет кардио (после каждых двух силовых).",
+        reply_markup=onboard_freq_kb(),
+    )
+    return True
+
+
 @trainer_router.message(Command("start"))
 @trainer_router.message(Command("menu"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
+    await record_user_chat("trainer", message.chat.id)
+    if await _need_onboard(message, state):
+        return
     await message.answer(
         "Привет! Я твой тренер 💪\n\n"
-        "🏋️ <b>Старт</b> — чек-ин, подбадривания и подходы в живом темпе\n"
-        "📋 <b>План</b> — сплит (full / верх-низ), разминка, выбор упражнений кнопками\n"
-        "📊 <b>Отчёты и календарь</b> — прогресс без скуки\n"
-        "🔧 <b>Техника</b> на каждом упражнении — кнопкой или голосом <code>40×10</code>\n\n"
+        "🏋️ <b>Старт</b> — сегодняшняя тренировка по плану\n"
+        "🗓 <b>План на месяц</b> — что делаем и когда\n"
+        "📊 Отчёты — день / неделя / месяц\n\n"
         "С чего начнём?",
         reply_markup=trainer_main_kb(),
     )
-    await record_user_chat("trainer", message.chat.id)
 
 
 @trainer_router.callback_query(F.data == "tr_main")
@@ -295,99 +330,31 @@ async def cb_resume(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@trainer_router.callback_query(F.data == "tr_plan_menu")
-async def cb_plan_menu(call: types.CallbackQuery):
+@trainer_router.callback_query(F.data.startswith("tr_ob_freq:"))
+async def cb_onboard_freq(call: types.CallbackQuery, state: FSMContext):
+    freq = parse_freq(call.data.split(":")[-1])
+    await set_setting("train_days_per_week", str(freq))
+    await save_state_pairs({"train_days_per_week": str(freq), "onboarding_complete": "1"})
+    await state.clear()
+    await call.message.answer("Собираю план на месяц…")
+    plan = await ensure_month_plan(freq)
+    n = len(plan.get("sessions") or [])
+    scheme = "верх/низ" if freq >= 4 else "всё тело"
     await call.message.answer(
-        "📋 <b>План тренировки</b>\n\n"
-        "• <b>Составить план ИИ</b> — название, разминка, порядок и подходы\n"
-        "• Пришли свой текст или <code>/plan …</code> — разложу по упражнениям\n"
-        "• <b>Последний план</b> — посмотреть, что уже готово",
-        reply_markup=plan_menu_kb(),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data == "tr_gen_plan")
-async def cb_gen_plan(call: types.CallbackQuery):
-    await call.message.answer(
-        "🧠 <b>Схема на неделю</b>\nВыбери сплит — соберу день с учётом базы и любимых ★",
-        reply_markup=scheme_pick_kb(),
-    )
-    await call.answer()
-
-
-@trainer_router.callback_query(F.data.startswith("tr_scheme:"))
-async def cb_scheme(call: types.CallbackQuery):
-    scheme = call.data.split(":")[-1]
-    await call.answer()
-    await call.message.answer("Собираю план из базы — порядок, разминка, ротация…")
-    db = await ExerciseDB.load()
-    if not db.by_id:
-        await call.message.answer("В таблице нет упражнений. Заполни лист «Список упражнений».")
-        return
-    plan = await generate_workout_plan(db, scheme)
-    if plan.get("error"):
-        await call.message.answer(str(plan["error"]))
-        return
-    await _save_plan(call.message, plan)
-
-
-@trainer_router.message(Command("plan"))
-async def ingest_plan_cmd(message: types.Message):
-    await _ingest_plan_msg(message)
-
-
-@trainer_router.message(~StateFilter(TrSession), F.text, ~F.text.startswith("/"))
-async def ingest_long_plan(message: types.Message):
-    if message.text and len(message.text) > 80:
-        await _ingest_plan_msg(message)
-
-
-async def _save_plan(message: types.Message, plan: dict) -> None:
-    cycle = plan.pop("cycle", None)
-    st = plan_to_state(plan)
-    pairs: Dict[str, str] = {"plan_last_json": json.dumps(st, ensure_ascii=False)}
-    if cycle:
-        pairs["plan_cycle_json"] = json.dumps(cycle, ensure_ascii=False)
-    await save_state_pairs(pairs)
-    await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
-    db = await ExerciseDB.load()
-    await message.answer(format_plan_message(plan if plan.get("title") else {**plan, **st}, db), reply_markup=trainer_main_kb())
-
-
-async def _ingest_plan_msg(message: types.Message):
-    try:
-        await record_user_chat("trainer", message.chat.id)
-    except Exception:
-        pass
-    text = message.text or ""
-    if text.startswith("/plan"):
-        text = text.replace("/plan", "", 1).strip()
-    db = await ExerciseDB.load()
-    plan = await parse_workout_plan(text, db)
-    if plan.get("error"):
-        await message.answer(str(plan["error"]))
-        return
-    await _save_plan(message, plan)
-
-
-@trainer_router.callback_query(F.data == "tr_last_plan")
-async def cb_last_plan(call: types.CallbackQuery):
-    try:
-        st = json.loads(SYSTEM_STATE.get("plan_last_json") or "{}")
-    except Exception:
-        st = {}
-    exs = st.get("exercises") or []
-    if not exs:
-        await call.message.answer("Сохранённого плана нет. Нажми «План тренировки».", reply_markup=trainer_main_kb())
-        await call.answer()
-        return
-    db = await ExerciseDB.load()
-    await call.message.answer(
-        format_plan_message({**st, "exercises": exs}, db),
+        f"Готово: <b>{freq} тренировки в неделю</b> · схема «{scheme}».\n"
+        f"В этом месяце {n} сессий, кардио — после каждых двух силовых.\n\n"
+        "Жми «Старт тренировки», когда будешь в зале.",
         reply_markup=trainer_main_kb(),
     )
     await call.answer()
+
+
+async def _save_plan(message: types.Message, plan: dict) -> None:
+    st = plan_to_state(plan)
+    await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
+    await append_row_to_sheet("План_тренировок", [now_local().strftime("%Y-%m-%d"), json.dumps(st, ensure_ascii=False)])
+    db = await ExerciseDB.load()
+    await message.answer(format_plan_message(plan if plan.get("title") else {**plan, **st}, db), reply_markup=trainer_main_kb())
 
 
 @trainer_router.callback_query(F.data == "tr_rep_d")
@@ -409,11 +376,20 @@ async def cb_rep_m(call: types.CallbackQuery):
 
 
 @trainer_router.callback_query(F.data == "tr_cal_png")
-async def cb_cal(call: types.CallbackQuery):
-    m = await current_month_tonnage_map()
+async def cb_cal(call: types.CallbackQuery, state: FSMContext):
+    freq = await _train_freq()
+    if not freq:
+        await _need_onboard(call.message, state)
+        await call.answer()
+        return
+    plan = await ensure_month_plan(freq)
     nl = now_local()
-    png = await month_png_bytes(nl.year, nl.month, m)
-    await call.message.answer_photo(BufferedInputFile(png, filename="cal.png"))
+    png = await month_png_bytes(nl.year, nl.month, days_map_for_png(plan))
+    caption = (
+        f"🗓 <b>План на месяц</b> · {freq}× в неделю\n"
+        "Кардио — после каждых двух силовых. Название в клетке — тип сессии."
+    )
+    await call.message.answer_photo(BufferedInputFile(png, filename="plan.png"), caption=caption)
     await call.answer()
 
 
@@ -426,6 +402,28 @@ async def cb_reset(call: types.CallbackQuery, state: FSMContext):
 
 @trainer_router.callback_query(F.data == "tr_start_flow")
 async def cb_start_flow(call: types.CallbackQuery, state: FSMContext):
+    freq = await _train_freq()
+    if not freq:
+        await _need_onboard(call.message, state)
+        await call.answer()
+        return
+    month = await ensure_month_plan(freq)
+    meta, note = pick_session_for_start(month)
+    if not meta:
+        await call.message.answer(note or "План на месяц пуст.", reply_markup=trainer_main_kb())
+        await call.answer()
+        return
+    await state.update_data(pending_session=meta)
+    await call.message.answer(format_today_session(meta, note), reply_markup=today_go_kb())
+    await call.answer()
+
+
+@trainer_router.callback_query(F.data == "tr_go")
+async def cb_go(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("pending_session"):
+        await cb_start_flow(call, state)
+        return
     await state.set_state(TrSession.check_cns)
     await call.message.answer(
         checkin_question("cns"),
@@ -487,7 +485,8 @@ async def cb_pre_psy(call: types.CallbackQuery, state: FSMContext):
     body = pre_begin_message(int(data.get("pre_cns", 5)), int(data.get("pre_joint", 5)), val)
     if nudge:
         body = nudge + "\n\n" + body
-    await call.message.answer(body, reply_markup=pre_begin_kb())
+    await call.message.answer(body)
+    await _begin_session(call.message, state)
     await call.answer()
 
 
@@ -545,30 +544,30 @@ async def _kb_for_exercise(state: FSMContext, ex_idx: int) -> InlineKeyboardMark
     return session_exercise_kb(ex_idx, is_fav=fav, sets_empty=empty)
 
 
-@trainer_router.callback_query(F.data == "tr_begin_session")
-async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
-    raw = SYSTEM_STATE.get("plan_last_json")
-    if not raw:
-        await call.answer()
-        await call.message.answer(
-            "Плана ещё нет — сначала соберём тренировку.",
-            reply_markup=plan_menu_kb(),
+async def _begin_session(message: types.Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    meta = data.get("pending_session")
+    db = await ExerciseDB.load()
+    if meta:
+        plan = materialize_session(meta, db)
+    else:
+        try:
+            plan = json.loads(SYSTEM_STATE.get("plan_last_json") or "{}")
+        except Exception:
+            plan = {}
+    exercises = plan.get("exercises") or []
+    if not exercises:
+        await message.answer(
+            "Не смогла собрать упражнения. Проверь лист «Список упражнений».",
+            reply_markup=trainer_main_kb(),
         )
         return
-    plan = json.loads(raw)
-    exercises = plan.get("exercises", [])
-    if not exercises:
-        await call.answer()
-        await call.message.answer("План пуст. Составим новый?", reply_markup=plan_menu_kb())
-        return
-    started = now_local().isoformat()
-    db = await ExerciseDB.load()
-    sess: List[Dict[str, Any]] = []
-    for ex in exercises:
-        sess.append(_session_ex_from_plan(ex, db))
+    st = plan_to_state(plan)
+    await save_state_pairs({"plan_last_json": json.dumps(st, ensure_ascii=False)})
+    sess: List[Dict[str, Any]] = [_session_ex_from_plan(ex, db) for ex in exercises]
     pending = list(range(len(sess)))
     await state.update_data(
-        started_at=started,
+        started_at=now_local().isoformat(),
         plan=plan,
         session=sess,
         cur_idx=-1,
@@ -576,10 +575,16 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
         warmup_done=False,
         completed_count=0,
         await_baseline=False,
+        session_n=plan.get("session_n") or (meta or {}).get("n"),
     )
     await state.set_state(TrSession.in_workout)
-    await call.message.answer(session_kickoff(len(sess), plan))
-    await _show_warmup(call.message, state)
+    await message.answer(session_kickoff(len(sess), plan))
+    await _show_warmup(message, state)
+
+
+@trainer_router.callback_query(F.data == "tr_begin_session")
+async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
+    await _begin_session(call.message, state)
     await call.answer()
 
 
@@ -1246,6 +1251,14 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
             state_pairs["plan_cycle_json"] = json.dumps(cycle, ensure_ascii=False)
     except Exception:
         pass
+    try:
+        n = int(data.get("session_n") or plan_meta.get("session_n") or 0)
+        month = load_month_plan()
+        if n and month:
+            month = mark_session_done(month, n)
+            state_pairs["month_plan_json"] = json.dumps(month, ensure_ascii=False)
+    except Exception:
+        pass
     await save_state_pairs(state_pairs)
     await send_cross_notification(
         "trainer",
@@ -1263,9 +1276,8 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
 
 
 @trainer_router.callback_query(F.data == "tr_rm_plan")
-async def cb_rm_plan(call: types.CallbackQuery):
-    await call.message.answer("Отправь текст плана в чат или /plan …")
-    await call.answer()
+async def cb_rm_plan(call: types.CallbackQuery, state: FSMContext):
+    await cb_start_flow(call, state)
 
 
 @trainer_router.callback_query(F.data == "tr_rm_light")

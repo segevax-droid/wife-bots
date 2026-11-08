@@ -401,5 +401,129 @@ def append_history_entry(day_key: str, exercise_ids: List[str]) -> Dict[str, Any
 SPLIT_LABELS = {
     "lower": "низ",
     "upper": "верх",
-    "full": "full body",
+    "full": "всё тело",
+    "cardio": "кардио",
 }
+
+PHASE_LABELS = {
+    "volume": "объём",
+    "intensity": "интенсив",
+    "deload": "разгрузка",
+}
+
+SPLIT_SHORT = {
+    "lower": "Низ",
+    "upper": "Верх",
+    "full": "Всё тело",
+    "cardio": "Кардио",
+}
+
+
+def scheme_for_frequency(sessions_per_week: int) -> str:
+    return "upper_lower" if sessions_per_week >= 4 else "full_body"
+
+
+def scale_slots_for_phase(slots: List[Dict[str, Any]], phase: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for raw in slots:
+        s = dict(raw)
+        if phase == "intensity":
+            if "reps" in s:
+                s["reps"] = max(5, int(s["reps"]) - 2)
+            if "duration_sec" in s:
+                s["duration_sec"] = min(75, int(s["duration_sec"]) + 15)
+        elif phase == "deload":
+            s["sets"] = max(2, int(s.get("sets", 3)) - 1)
+            if "duration_sec" in s:
+                s["duration_sec"] = max(20, int(s["duration_sec"]) - 10)
+        elif phase == "volume":
+            if "reps" in s:
+                s["reps"] = int(s["reps"]) + 2
+        out.append(s)
+    return out
+
+
+def cardio_day_plan(phase: str) -> Dict[str, Any]:
+    if phase == "intensity":
+        exercises = [
+            {
+                "exercise_id": "cardio_wu",
+                "name": "Разгон: лёгкое кардио",
+                "original": "Разгон: лёгкое кардио",
+                "sets": 1,
+                "is_timed": True,
+                "duration_sec_target": 300,
+                "weight_kg": 0.0,
+                "group": "Кардио",
+            },
+            {
+                "exercise_id": "cardio_int",
+                "name": "Интервалы 40/80 с",
+                "original": "Интервалы 40/80 с",
+                "sets": 8,
+                "is_timed": True,
+                "duration_sec_target": 40,
+                "weight_kg": 0.0,
+                "group": "Кардио",
+            },
+            {
+                "exercise_id": "cardio_cd",
+                "name": "Заминка ходьбой",
+                "original": "Заминка ходьбой",
+                "sets": 1,
+                "is_timed": True,
+                "duration_sec_target": 300,
+                "weight_kg": 0.0,
+                "group": "Кардио",
+            },
+        ]
+        title = "Кардио · интервалы"
+        coach = "После двух силовых — пульсовая работа. 40 с быстрее, 80 с спокойно."
+        warmup = "3 мин лёгкого шага, затем 2 ускорения по 20 с."
+        minutes = 8
+    elif phase == "deload":
+        exercises = [
+            {
+                "exercise_id": "cardio_easy",
+                "name": "Спокойная ходьба / вело",
+                "original": "Спокойная ходьба / вело",
+                "sets": 1,
+                "is_timed": True,
+                "duration_sec_target": 1200,
+                "weight_kg": 0.0,
+                "group": "Кардио",
+            }
+        ]
+        title = "Кардио · восстановление"
+        coach = "Разгрузочная неделя: разговорный темп, без гонки за пульсом."
+        warmup = "Суставы 2 минуты и сразу в спокойный темп."
+        minutes = 4
+    else:
+        exercises = [
+            {
+                "exercise_id": "cardio_z2",
+                "name": "Кардио зона 2 (ходьба / эллипс / вело)",
+                "original": "Кардио зона 2",
+                "sets": 1,
+                "is_timed": True,
+                "duration_sec_target": 1500,
+                "weight_kg": 0.0,
+                "group": "Кардио",
+            }
+        ]
+        title = "Кардио · зона 2"
+        coach = "После двух силовых — аэробная база. Можно говорить предложениями."
+        warmup = "2–3 мин лёгкого шага, затем рабочий темп."
+        minutes = 5
+    return {
+        "title": title,
+        "day_key": "C",
+        "split": "cardio",
+        "scheme": "cardio",
+        "kind": "cardio",
+        "phase": phase,
+        "warmup_note": warmup,
+        "warmup": {"cardio": warmup, "mobility": "свободное дыхание, плечи и бёдра.", "minutes": minutes},
+        "coach_note": coach,
+        "exercises": exercises,
+    }

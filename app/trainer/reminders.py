@@ -38,7 +38,7 @@ async def maybe_send_workout_reminders(bot_trainer: Bot) -> None:
         return
     text = (
         "👋 Давно не виделись в зале — тело скучает по движению.\n"
-        "Можем лёгкий домашний комплекс или свежий план ИИ — как удобнее?"
+        "Можем лёгкий домашний комплекс или сразу старт по плану месяца — как удобнее?"
     )
     try:
         await bot_trainer.send_message(int(cid), text, reply_markup=reminder_train_kb())

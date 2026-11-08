@@ -12,14 +12,11 @@ def _back_row(callback_data: str) -> List[InlineKeyboardButton]:
 def trainer_main_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🏋️ Старт тренировки", callback_data="tr_start_flow")],
-        [InlineKeyboardButton(text="📋 План тренировки", callback_data="tr_plan_menu")],
+        [InlineKeyboardButton(text="🗓 План на месяц", callback_data="tr_cal_png")],
         [
             InlineKeyboardButton(text="📅 День", callback_data="tr_rep_d"),
             InlineKeyboardButton(text="📆 Неделя", callback_data="tr_rep_w"),
-        ],
-        [
-            InlineKeyboardButton(text="🗓 Месяц", callback_data="tr_rep_m"),
-            InlineKeyboardButton(text="🖼 Календарь", callback_data="tr_cal_png"),
+            InlineKeyboardButton(text="📊 Месяц", callback_data="tr_rep_m"),
         ],
         [
             InlineKeyboardButton(text="🤖 Gemini", callback_data="check_gemini_quota"),
@@ -27,6 +24,31 @@ def trainer_main_kb() -> InlineKeyboardMarkup:
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def onboard_freq_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="2×", callback_data="tr_ob_freq:2"),
+                InlineKeyboardButton(text="3×", callback_data="tr_ob_freq:3"),
+                InlineKeyboardButton(text="4×", callback_data="tr_ob_freq:4"),
+            ],
+            [
+                InlineKeyboardButton(text="5×", callback_data="tr_ob_freq:5"),
+                InlineKeyboardButton(text="6×", callback_data="tr_ob_freq:6"),
+            ],
+        ]
+    )
+
+
+def today_go_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Поехали!", callback_data="tr_go")],
+            [InlineKeyboardButton(text="« Меню", callback_data="tr_main")],
+        ]
+    )
 
 
 def plan_menu_kb() -> InlineKeyboardMarkup:
@@ -64,7 +86,6 @@ def pick_next_kb(pending_indices: List[int], session: List[Dict[str, Any]]) -> I
     rows: List[List[InlineKeyboardButton]] = []
     if pending_indices:
         head = session[pending_indices[0]]
-        sets = head.get("target_sets") or head.get("sets", 3)
         vol = format_volume(head)
         label = f"✅ {head['name'][:18]} {vol}"
         rows.append([InlineKeyboardButton(text=label, callback_data="tr_nx:0")])
@@ -92,7 +113,7 @@ def favorites_menu_kb(items: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"✕ {x.get('name', '')[:30]}", callback_data=f"tr_fav_rm:{x['id']}")]
         for x in items[:12]
     ]
-    rows.append(_back_row("tr_plan_menu"))
+    rows.append(_back_row("tr_main"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -208,7 +229,7 @@ def reminder_train_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📋 План", callback_data="tr_rm_plan"),
+                InlineKeyboardButton(text="🏋️ Старт", callback_data="tr_start_flow"),
                 InlineKeyboardButton(text="🏠 Лёгкая дома", callback_data="tr_rm_light"),
             ],
             [InlineKeyboardButton(text="⏸ Не сейчас", callback_data="tr_rm_no")],

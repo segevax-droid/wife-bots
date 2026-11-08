@@ -19,11 +19,19 @@ def is_timed_ex(ex: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> bo
     return ExerciseDB.is_timed(base or {"name": ex.get("name"), "synonyms": "", "type": ""})
 
 
+def format_sec(sec: int) -> str:
+    sec = int(sec)
+    if sec >= 120:
+        m, s = divmod(sec, 60)
+        return f"{m} мин" if s == 0 else f"{m} мин {s} с"
+    return f"{sec} с"
+
+
 def format_volume(ex: Dict[str, Any]) -> str:
     sets = ex.get("sets", ex.get("target_sets", 3))
     if is_timed_ex(ex):
         sec = int(ex.get("duration_sec_target") or 45)
-        return f"{sets}×{sec} с"
+        return f"{sets}×{format_sec(sec)}"
     reps = ex.get("reps_target", 10)
     return f"{sets}×{reps}"
 
@@ -105,7 +113,7 @@ def pre_begin_message(pre_cns: int, pre_joint: int, pre_psy: int) -> str:
     elif pre_psy >= 8:
         tone = "Чувствую заряд — разогрейся 5–7 минут и вперёд, время выжимать максимум из плана!"
     else:
-        tone = "Разминка 5 минут (суставы + лёгкая активация), потом жми «Начать тренировку» — я рядом на каждом подходе."
+        tone = "Разминка 5 минут (суставы + лёгкая активация) — я рядом на каждом подходе."
     return (
         "✅ <b>Чек-ин готов</b>\n"
         f"{tone}\n\n"
@@ -123,6 +131,25 @@ def session_kickoff(n: int, plan_meta: Optional[Dict[str, Any]] = None) -> str:
     if note:
         parts.append(f"💬 {note}")
     return "\n".join(parts)
+
+
+def format_today_session(meta: Dict[str, Any], note: str = "") -> str:
+    n = meta.get("n") or meta.get("session_n") or "?"
+    title = _h(meta.get("title") or "Тренировка")
+    kind = "кардио" if meta.get("kind") == "cardio" else "сила"
+    ds = str(meta.get("date") or "")
+    date_part = f"{ds[8:10]}.{ds[5:7]}" if len(ds) >= 10 else ""
+    lines = [
+        f"📅 <b>Сегодня по плану тренировка {n}</b>",
+        f"{title}",
+        f"<i>{kind}" + (f" · {date_part}" if date_part else "") + "</i>",
+    ]
+    if note:
+        lines.append("")
+        lines.append(note)
+    lines.append("")
+    lines.append("Жми «Поехали!» — сначала чек-ин, потом разминка.")
+    return "\n".join(lines)
 
 
 def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -> str:
@@ -204,7 +231,7 @@ def exercise_card(
         wplan = ex.get("weight_kg")
     progress = "▓" * done + "░" * max(0, tgt - done)
     if timed:
-        hint = f"ориентир <b>{dur_tgt} с</b> удержания"
+        hint = f"ориентир <b>{format_sec(dur_tgt)}</b> удержания"
     elif wplan is not None and float(wplan) == 0:
         hint = f"ориентир <b>0</b> × {reps}"
     elif wplan:
@@ -231,7 +258,7 @@ def exercise_card(
     if tech_line:
         body.append(f"<i>{_h(tech_line)}</i>")
     if timed:
-        ex_hint = f"<code>{dur_tgt}с</code> или «{dur_tgt} секунд»"
+        ex_hint = f"<code>{dur_tgt}с</code> или «{format_sec(dur_tgt)}»"
         diff_hint = f"<code>{dur_tgt}, 7</code>"
     else:
         ex_hint = "<code>0×10</code>" if (wplan == 0 or is_bodyweight_ex(ex, base)) else "<code>40×10</code>"
@@ -275,7 +302,7 @@ def praise_after_set(
     is_timed: bool = False,
 ) -> str:
     if is_timed:
-        core = f"✅ Записала: <b>{reps:g} с</b>"
+        core = f"✅ Записала: <b>{format_sec(int(reps))}</b>"
     elif weight <= 0:
         core = f"✅ Записала: <b>0 × {reps:g}</b>"
     else:
