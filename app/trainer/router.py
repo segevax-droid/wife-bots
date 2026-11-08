@@ -64,6 +64,7 @@ from app.trainer.ux import (
     format_warmup_card,
     parse_error_friendly,
     pre_begin_message,
+    is_timed_ex,
     praise_after_set,
     rest_ping_message,
     session_kickoff,
@@ -141,6 +142,70 @@ async def parse_set_gemini(text: str) -> Optional[Dict[str, float]]:
         return None
 
 
+def parse_duration_local(text: str) -> Optional[Dict[str, float]]:
+    s = re.sub(r"(\d),(\d)", r"\1.\2", (text or "").strip().lower())
+    m = re.search(r"(\d{1,4})\s*(?:секунд|сек|сек\.|с\.|с\b|sec|s\b)", s)
+    if m:
+        sec = float(m.group(1))
+        if 3 <= sec <= 3600:
+            return {"weight": 0.0, "reps": sec}
+    m = re.search(r"(?:^|[\s])(\d{1,4})\s*[,;/]\s*(\d{1,2})\s*$", s)
+    if m:
+        sec, d = int(m.group(1)), int(m.group(2))
+        if 3 <= sec <= 3600 and 1 <= d <= 10:
+            return {"weight": 0.0, "reps": float(sec), "difficulty": float(d)}
+    if re.fullmatch(r"\d{1,4}", s.strip()):
+        sec = float(s.strip())
+        if 3 <= sec <= 3600:
+            return {"weight": 0.0, "reps": sec}
+    return None
+
+
+async def parse_duration_gemini(text: str) -> Optional[Dict[str, float]]:
+    local = parse_duration_local(text)
+    if local:
+        return local
+    if not re.search(r"\d", text or ""):
+        return None
+    p = (
+        f'Извлеки длительность удержания в СЕКУНДАХ (целое число). '
+        f'Ответ только JSON: {{"weight":0,"reps":число_секунд}}. Строка: {text}'
+    )
+    raw = await call_gemini(p)
+    m = re.search(r"\{[^}]+\}", raw)
+    if not m:
+        return None
+    try:
+        j = json.loads(m.group(0))
+        sec = float(j.get("reps", j.get("seconds", 0)))
+        if sec < 3 or sec > 3600:
+            return None
+        return {"weight": 0.0, "reps": sec}
+    except Exception:
+        return None
+
+
+def _session_ex_from_plan(ex: Dict[str, Any], db: ExerciseDB) -> Dict[str, Any]:
+    w = ex.get("weight_kg")
+    base = db.by_id.get(ex.get("exercise_id", ""))
+    if w is None and (ExerciseDB.is_bodyweight(base) or ExerciseDB.is_bodyweight({"name": ex.get("name")})):
+        w = 0
+    timed = ex.get("is_timed") or ExerciseDB.is_timed(base) or ExerciseDB.is_timed({"name": ex.get("name")})
+    row: Dict[str, Any] = {
+        "exercise_id": ex["exercise_id"],
+        "name": ex["name"],
+        "sets": [],
+        "target_sets": ex.get("sets", 3),
+        "weight_kg_plan": w,
+    }
+    if timed:
+        row["is_timed"] = True
+        row["duration_sec_target"] = int(ex.get("duration_sec_target") or 45)
+    else:
+        row["reps_target"] = ex.get("reps_target", 10)
+    return row
+
+
 def _scale_val(data: str) -> int:
     return int(data.rsplit("_", 1)[-1])
 
@@ -167,14 +232,19 @@ def _pick_analog_triplet(pool: List[Dict[str, Any]], exclude: set, current_id: s
 
 
 def _replace_session_ex(sess: List[Dict[str, Any]], idx: int, *, exercise_id: str, name: str, template: Dict[str, Any]) -> None:
-    sess[idx] = {
+    row: Dict[str, Any] = {
         "exercise_id": exercise_id,
         "name": name,
         "sets": [],
         "target_sets": template.get("target_sets", template.get("sets", 3)),
-        "reps_target": template.get("reps_target", 10),
         "weight_kg_plan": template.get("weight_kg_plan", template.get("weight_kg")),
     }
+    if template.get("is_timed"):
+        row["is_timed"] = True
+        row["duration_sec_target"] = int(template.get("duration_sec_target") or 45)
+    else:
+        row["reps_target"] = template.get("reps_target", 10)
+    sess[idx] = row
 
 
 @trainer_router.message(Command("start"))
@@ -495,20 +565,7 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
     db = await ExerciseDB.load()
     sess: List[Dict[str, Any]] = []
     for ex in exercises:
-        w = ex.get("weight_kg")
-        base = db.by_id.get(ex.get("exercise_id", ""))
-        if w is None and (ExerciseDB.is_bodyweight(base) or ExerciseDB.is_bodyweight({"name": ex.get("name")})):
-            w = 0
-        sess.append(
-            {
-                "exercise_id": ex["exercise_id"],
-                "name": ex["name"],
-                "sets": [],
-                "target_sets": ex.get("sets", 3),
-                "reps_target": ex.get("reps_target", 10),
-                "weight_kg_plan": w,
-            }
-        )
+        sess.append(_session_ex_from_plan(ex, db))
     pending = list(range(len(sess)))
     await state.update_data(
         started_at=started,
@@ -638,16 +695,29 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
         else:
             await message.answer("Не расслышала голос. Напиши, например <code>40×10</code>.")
             return
+    db = await ExerciseDB.load()
+    base = db.by_id.get(ex.get("exercise_id", ""))
+    timed = is_timed_ex(ex, base)
     if message.photo:
         b64 = await download_file_as_base64(bot, message.photo[-1].file_id)
-        txt = await call_gemini(
-            "Считай вес (кг) и повторы с фото. Ответ одной строкой: числа.",
-            media_b64=b64,
-            mime_type="image/jpeg",
-        )
-    parsed = await parse_set_gemini(txt)
+        if timed:
+            txt = await call_gemini(
+                "Считай длительность удержания в СЕКУНДАХ с фото таймера. Ответ одной строкой: число секунд.",
+                media_b64=b64,
+                mime_type="image/jpeg",
+            )
+        else:
+            txt = await call_gemini(
+                "Считай вес (кг) и повторы с фото. Ответ одной строкой: числа.",
+                media_b64=b64,
+                mime_type="image/jpeg",
+            )
+    if timed:
+        parsed = await parse_duration_gemini(txt)
+    else:
+        parsed = await parse_set_gemini(txt)
     if not parsed:
-        await message.answer(parse_error_friendly())
+        await message.answer(parse_error_friendly(is_timed=timed))
         return
     row: Dict[str, Any] = {"weight": parsed["weight"], "reps": parsed["reps"]}
     if parsed.get("difficulty"):
@@ -661,14 +731,21 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
             message,
             state,
             idx,
-            praise_after_set(parsed["weight"], parsed["reps"], int(row["difficulty"]), si, tgt),
+            praise_after_set(
+                parsed["weight"],
+                parsed["reps"],
+                int(row["difficulty"]),
+                si,
+                tgt,
+                is_timed=timed,
+            ),
         )
         return
     await _after_set_logged(
         message,
         state,
         idx,
-        praise_after_set(parsed["weight"], parsed["reps"], None, si, tgt),
+        praise_after_set(parsed["weight"], parsed["reps"], None, si, tgt, is_timed=timed),
         ask_difficulty=True,
         set_i=si,
     )
@@ -686,12 +763,16 @@ async def cb_set_diff(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(session=sess)
     tgt = int(ex.get("target_sets") or 3)
     last = ex["sets"][si]
+    db = await ExerciseDB.load()
+    base = db.by_id.get(ex.get("exercise_id", ""))
+    timed = is_timed_ex(ex, base)
     praise = praise_after_set(
         float(last.get("weight", 0)),
         float(last.get("reps", 0)),
         int(diff),
         si,
         tgt,
+        is_timed=timed,
     )
     await _after_set_logged(call.message, state, idx, praise)
     await call.answer()
@@ -995,14 +1076,8 @@ async def cb_pick_swap(call: types.CallbackQuery, state: FSMContext):
     ex = next(x for x in plan if x["exercise_id"] == eid)
     sess = data["session"]
     idx = data["cur_idx"]
-    sess[idx] = {
-        "exercise_id": ex["exercise_id"],
-        "name": ex["name"],
-        "sets": [],
-        "target_sets": ex.get("sets", 3),
-        "reps_target": ex.get("reps_target", 10),
-        "weight_kg_plan": ex.get("weight_kg"),
-    }
+    db = await ExerciseDB.load()
+    sess[idx] = _session_ex_from_plan(ex, db)
     await state.update_data(session=sess)
     await _show_exercise(call.message, state)
     await call.answer()
@@ -1080,7 +1155,10 @@ async def cb_post_ctrl(call: types.CallbackQuery, state: FSMContext, bot_trainer
     tons_total = 0.0
     for ex in sess:
         sets = [s for s in ex["sets"] if not s.get("skipped")]
-        tnx = sum(s["weight"] * s["reps"] for s in sets)
+        if ex.get("is_timed"):
+            tnx = 0.0
+        else:
+            tnx = sum(s["weight"] * s["reps"] for s in sets)
         diffs = [s.get("difficulty") for s in sets if s.get("difficulty") is not None]
         avg_d = sum(diffs) / len(diffs) if diffs else float(ex.get("exercise_difficulty", 5) or 5)
         avg_w = sum(s["weight"] for s in sets) / len(sets) if sets else 0

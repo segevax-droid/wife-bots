@@ -96,7 +96,7 @@ DAY_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
                 {"groups": ["Грудь"], "role": "primary", "sets": 3, "reps": 10},
                 {"groups": ["Плечи"], "role": "aux", "sets": 3, "reps": 12},
                 {"groups": ["Руки"], "role": "aux", "sets": 3, "reps": 12},
-                {"groups": ["Кор", "Пресс"], "role": "isolation", "sets": 3, "reps": 15},
+                {"groups": ["Кор", "Пресс"], "role": "isolation", "sets": 3, "duration_sec": 45},
             ],
         }
     ],
@@ -110,7 +110,7 @@ DAY_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
                 {"groups": ["Ягодицы"], "role": "primary", "sets": 3, "reps": 10},
                 {"groups": ["Ноги"], "role": "aux", "sets": 3, "reps": 10},
                 {"groups": ["Ноги", "Ягодицы"], "role": "aux", "sets": 3, "reps": 12},
-                {"groups": ["Кор", "Пресс"], "role": "isolation", "sets": 3, "reps": 15},
+                {"groups": ["Кор", "Пресс"], "role": "isolation", "sets": 3, "duration_sec": 45},
             ],
         },
         {
@@ -262,18 +262,22 @@ def _score_ex(
 
 
 def _append_plan_ex(exercises: List[Dict[str, Any]], ex: Dict[str, Any], slot: Dict[str, Any]) -> None:
-    exercises.append(
-        {
-            "exercise_id": ex["id"],
-            "name": ex["name"],
-            "original": ex["name"],
-            "sets": slot.get("sets", 3),
-            "reps_target": slot.get("reps", 10),
-            "weight_kg": _plan_weight(ex),
-            "role": slot.get("role", "aux"),
-            "group": ex.get("_cg") or canonical_group(ex),
-        }
-    )
+    timed = ExerciseDB.is_timed(ex)
+    row: Dict[str, Any] = {
+        "exercise_id": ex["id"],
+        "name": ex["name"],
+        "original": ex["name"],
+        "sets": slot.get("sets", 3),
+        "weight_kg": _plan_weight(ex),
+        "role": slot.get("role", "aux"),
+        "group": ex.get("_cg") or canonical_group(ex),
+    }
+    if timed:
+        row["is_timed"] = True
+        row["duration_sec_target"] = int(slot.get("duration_sec", 45))
+    else:
+        row["reps_target"] = slot.get("reps", 10)
+    exercises.append(row)
 
 
 def build_day_plan(

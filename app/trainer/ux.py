@@ -13,6 +13,21 @@ def is_bodyweight_ex(ex: Dict[str, Any], base: Optional[Dict[str, Any]] = None) 
     return ExerciseDB.is_bodyweight({"name": ex.get("name"), "equipment": ""})
 
 
+def is_timed_ex(ex: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> bool:
+    if ex.get("is_timed"):
+        return True
+    return ExerciseDB.is_timed(base or {"name": ex.get("name"), "synonyms": "", "type": ""})
+
+
+def format_volume(ex: Dict[str, Any]) -> str:
+    sets = ex.get("sets", ex.get("target_sets", 3))
+    if is_timed_ex(ex):
+        sec = int(ex.get("duration_sec_target") or 45)
+        return f"{sets}×{sec} с"
+    reps = ex.get("reps_target", 10)
+    return f"{sets}×{reps}"
+
+
 def _h(text: str) -> str:
     return html.escape(str(text or ""), quote=False)
 
@@ -154,7 +169,7 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
                 wpart = ""
             star = "★ " if is_favorite(str(ex.get("exercise_id", ""))) else ""
             lines.append(
-                f"  • {star}{_h(ex['name'])} — <b>{ex.get('sets', 3)}×{ex.get('reps_target', 10)}</b>{wpart}"
+                f"  • {star}{_h(ex['name'])} — <b>{format_volume(ex)}</b>{wpart}"
             )
         lines.append("")
     lines.append("<i>Готова? «Старт тренировки» → чек-ин → «Начать».</i>")
@@ -182,11 +197,15 @@ def exercise_card(
     done = len(ex.get("sets") or [])
     tgt = int(ex.get("target_sets") or 3)
     reps = ex.get("reps_target") or 10
+    timed = is_timed_ex(ex, base)
+    dur_tgt = int(ex.get("duration_sec_target") or 45)
     wplan = ex.get("weight_kg_plan")
     if wplan is None and ex.get("weight_kg") is not None:
         wplan = ex.get("weight_kg")
     progress = "▓" * done + "░" * max(0, tgt - done)
-    if wplan is not None and float(wplan) == 0:
+    if timed:
+        hint = f"ориентир <b>{dur_tgt} с</b> удержания"
+    elif wplan is not None and float(wplan) == 0:
         hint = f"ориентир <b>0</b> × {reps}"
     elif wplan:
         hint = f"ориентир <b>{float(wplan):g} кг</b> × {reps}"
@@ -211,8 +230,16 @@ def exercise_card(
     ]
     if tech_line:
         body.append(f"<i>{_h(tech_line)}</i>")
-    ex_hint = "<code>0×10</code>" if (wplan == 0 or is_bodyweight_ex(ex, base)) else "<code>40×10</code>"
-    body.append(f"✍️ Результат: {ex_hint} или «40 кг 10 раз» · тяжесть: <code>{'0×10, 7' if wplan == 0 else '40×10, 7'}</code>")
+    if timed:
+        ex_hint = f"<code>{dur_tgt}с</code> или «{dur_tgt} секунд»"
+        diff_hint = f"<code>{dur_tgt}, 7</code>"
+    else:
+        ex_hint = "<code>0×10</code>" if (wplan == 0 or is_bodyweight_ex(ex, base)) else "<code>40×10</code>"
+        diff_hint = f"<code>{'0×10, 7' if wplan == 0 else '40×10, 7'}</code>"
+    if timed:
+        body.append(f"✍️ Результат: {ex_hint} · тяжесть: {diff_hint}")
+    else:
+        body.append(f"✍️ Результат: {ex_hint} или «40 кг 10 раз» · тяжесть: {diff_hint}")
     body.append("Кнопка <b>Техника</b> — полное объяснение.")
     return "\n".join(body)
 
@@ -244,8 +271,12 @@ def praise_after_set(
     difficulty: Optional[int],
     set_i: int,
     target_sets: int,
+    *,
+    is_timed: bool = False,
 ) -> str:
-    if weight <= 0:
+    if is_timed:
+        core = f"✅ Записала: <b>{reps:g} с</b>"
+    elif weight <= 0:
         core = f"✅ Записала: <b>0 × {reps:g}</b>"
     else:
         core = f"✅ Записала: <b>{weight:g} кг × {reps:g}</b>"
@@ -280,7 +311,13 @@ def rest_ping_message() -> str:
     return random.choice(opts)
 
 
-def parse_error_friendly() -> str:
+def parse_error_friendly(*, is_timed: bool = False) -> str:
+    if is_timed:
+        return (
+            "🤔 Не разобрала время.\n"
+            "Примеры: <code>45с</code>, «50 секунд», просто <code>60</code>.\n"
+            "Тяжесть: <code>45, 7</code>."
+        )
     return (
         "🤔 Не разобрала подход.\n"
         "Примеры: <code>60×8</code>, «60 кг 8 раз».\n"

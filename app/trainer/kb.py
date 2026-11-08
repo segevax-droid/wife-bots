@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.trainer.ux import format_volume
+
 
 def _back_row(callback_data: str) -> List[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="« Назад", callback_data=callback_data)]
@@ -63,8 +65,8 @@ def pick_next_kb(pending_indices: List[int], session: List[Dict[str, Any]]) -> I
     if pending_indices:
         head = session[pending_indices[0]]
         sets = head.get("target_sets") or head.get("sets", 3)
-        reps = head.get("reps_target", 10)
-        label = f"✅ {head['name'][:22]} {sets}×{reps}"
+        vol = format_volume(head)
+        label = f"✅ {head['name'][:18]} {vol}"
         rows.append([InlineKeyboardButton(text=label, callback_data="tr_nx:0")])
     for q, si in enumerate(pending_indices[1:6], start=1):
         ex = session[si]

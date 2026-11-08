@@ -27,21 +27,31 @@ def _map_exercises(data: dict, db: ExerciseDB) -> List[Dict[str, Any]]:
             eid, ename = sim[0]["id"], sim[0]["name"]
         sets = int(ex.get("sets", 3) or 3)
         reps = int(ex.get("reps_target", 10) or 10)
+        dur = ex.get("duration_sec") or ex.get("duration_sec_target")
+        try:
+            dur_i = int(dur) if dur is not None else 0
+        except (TypeError, ValueError):
+            dur_i = 0
         w = ex.get("weight_kg")
         try:
             w = float(w) if w is not None else None
         except (TypeError, ValueError):
             w = None
-        out.append(
-            {
-                "exercise_id": eid,
-                "name": ename,
-                "original": name,
-                "sets": max(1, min(sets, 12)),
-                "reps_target": max(1, min(reps, 50)),
-                "weight_kg": w,
-            }
-        )
+        base_row = matched or {"name": ename}
+        timed = ExerciseDB.is_timed(base_row) or dur_i > 0 or bool(ex.get("is_timed"))
+        item: Dict[str, Any] = {
+            "exercise_id": eid,
+            "name": ename,
+            "original": name,
+            "sets": max(1, min(sets, 12)),
+            "weight_kg": w,
+        }
+        if timed:
+            item["is_timed"] = True
+            item["duration_sec_target"] = max(5, min(dur_i or 45, 600))
+        else:
+            item["reps_target"] = max(1, min(reps, 50))
+        out.append(item)
     return out
 
 
@@ -80,8 +90,9 @@ async def parse_workout_plan(text: str, db: ExerciseDB) -> Dict[str, Any]:
   "title":"название",
   "warmup_note":"краткая разминка",
   "coach_note":"зачем такой порядок",
-  "exercises":[{{"name":"...", "sets":3, "reps_target":10, "weight_kg":null}}]
+  "exercises":[{{"name":"...", "sets":3, "reps_target":10, "duration_sec":null, "weight_kg":null}}]
 }}
+Для планки и удержаний: reps_target не используй, укажи duration_sec (секунды).
 Имена упражнений на русском как в тексте. weight_kg число или null.
 Текст плана:
 {text}
@@ -124,15 +135,28 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
         "warmup_note": "5–7 минут: круговые движения суставами, лёгкие приседы и махи руками, 1–2 разминочных подхода в первых упражнениях.",
         "coach_note": "Сбалансированный микс: ноги → тяга/спина → жим → плечи/руки — классика для всего тела.",
         "exercises": [
-            {
-                "exercise_id": e["id"],
-                "name": e["name"],
-                "original": e["name"],
-                "sets": 3,
-                "reps_target": 10,
-                "weight_kg": 0.0 if ExerciseDB.is_bodyweight(e) else None,
-                "group": e.get("group") or "",
-            }
+            (
+                {
+                    "exercise_id": e["id"],
+                    "name": e["name"],
+                    "original": e["name"],
+                    "sets": 3,
+                    "is_timed": True,
+                    "duration_sec_target": 45,
+                    "weight_kg": 0.0,
+                    "group": e.get("group") or "",
+                }
+                if ExerciseDB.is_timed(e)
+                else {
+                    "exercise_id": e["id"],
+                    "name": e["name"],
+                    "original": e["name"],
+                    "sets": 3,
+                    "reps_target": 10,
+                    "weight_kg": 0.0 if ExerciseDB.is_bodyweight(e) else None,
+                    "group": e.get("group") or "",
+                }
+            )
             for e in picked[:8]
         ],
     }

@@ -128,6 +128,40 @@ class ExerciseDB:
                     pool.append(other)
         return pool[: max(limit, 30)]
 
+    _TIMED_NAME_PARTS = (
+        "планка",
+        "plank",
+        "боковая планка",
+        "вис ",
+        "висе",
+        "вис на",
+        "dead hang",
+        "статич",
+        "изометр",
+        "уголок",
+        "hollow",
+        "wall sit",
+        "стенк",
+        "присед у стен",
+        "лодочк",
+    )
+
+    @classmethod
+    def is_timed(cls, ex: Optional[Dict[str, Any]]) -> bool:
+        if not ex:
+            return False
+        if ex.get("is_timed"):
+            return True
+        name = (ex.get("name") or "").lower()
+        syn = (ex.get("synonyms") or "").lower()
+        typ = (ex.get("type") or "").lower()
+        hay = f"{name} {syn}"
+        if any(p in hay for p in cls._TIMED_NAME_PARTS):
+            return True
+        if any(p in typ for p in ("изометр", "статик", "timed", "удержан")):
+            return True
+        return False
+
     @staticmethod
     def is_bodyweight(ex: Optional[Dict[str, Any]]) -> bool:
         if not ex:
