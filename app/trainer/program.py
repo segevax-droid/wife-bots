@@ -2,12 +2,78 @@
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.state import SYSTEM_STATE
 from app.trainer.exercise_db import ExerciseDB
 
 FB_GROUP_ORDER = ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Пресс", "Ягодицы")
+
+# Sheet group labels vary; match by substring, then by exercise name.
+_GROUP_KEYS: List[Tuple[str, str]] = [
+    ("ягодиц", "Ягодицы"),
+    ("бицепс бедра", "Ноги"),
+    ("задн", "Ноги"),
+    ("квадр", "Ноги"),
+    ("икр", "Ноги"),
+    ("голен", "Ноги"),
+    ("ног", "Ноги"),
+    ("спин", "Спина"),
+    ("широк", "Спина"),
+    ("трапец", "Спина"),
+    ("грудь", "Грудь"),
+    ("грудн", "Грудь"),
+    ("пектор", "Грудь"),
+    ("плеч", "Плечи"),
+    ("делт", "Плечи"),
+    ("трицепс", "Руки"),
+    ("бицепс", "Руки"),
+    ("рук", "Руки"),
+    ("пресс", "Пресс"),
+    ("кор", "Кор"),
+    ("core", "Кор"),
+]
+
+_NAME_KEYS: List[Tuple[tuple, str]] = [
+    (("ягодичн", "hip thrust", "glute"), "Ягодицы"),
+    (("присед", "выпад", "жим ногами", "разгибан", "сгибан ног", "румынск", "становая", "икры", "голен"), "Ноги"),
+    (("подтяг", "тяга", "гиперэкстенз", "лицфейс", "пульдаун", "pull"), "Спина"),
+    (("жим лёж", "жим лежа", "отжим", "сведен", "пуловер", "бабочка", "pec"), "Грудь"),
+    (("жим стоя", "жим сидя", "махи", "разведен", "арнольд"), "Плечи"),
+    (("бицепс", "трицепс", "молот", "французск", "сгибан рук"), "Руки"),
+    (("скручиван", "планка", "пресс", "crunch"), "Пресс"),
+]
+
+
+def canonical_group(ex: Dict[str, Any]) -> str:
+    raw = (ex.get("group") or "").strip().lower()
+    name = (ex.get("name") or "").strip().lower()
+    for key, g in _GROUP_KEYS:
+        if key in raw:
+            return g
+    for keys, g in _NAME_KEYS:
+        if any(k in name for k in keys):
+            return g
+    for key, g in _GROUP_KEYS:
+        if key in name:
+            return g
+    return (ex.get("group") or "").strip() or "Прочее"
+
+
+def _is_placeholder_name(name: str) -> bool:
+    return bool(re.search(r"упражнение\s+\d+", name or "", re.I))
+
+
+def _catalog(db: ExerciseDB) -> List[Dict[str, Any]]:
+    """All exercises, annotated with canonical group. Prefer real names inside a group."""
+    out: List[Dict[str, Any]] = []
+    for ex in db.by_id.values():
+        row = dict(ex)
+        row["_cg"] = canonical_group(ex)
+        row["_ph"] = _is_placeholder_name(ex.get("name") or "")
+        out.append(row)
+    return out
 from app.trainer.favorites import load_favorite_ids
 
 HISTORY_KEY = "plan_history_json"
@@ -122,58 +188,42 @@ def _role_of(ex: Dict[str, Any]) -> str:
     return "aux"
 
 
-def _pool_for_slot(db: ExerciseDB, groups: List[str], role: str) -> List[Dict[str, Any]]:
-    pool: List[Dict[str, Any]] = []
-    for ex in db.real_named():
-        g = (ex.get("group") or "").strip()
-        if groups and g not in groups:
-            continue
-        r = _role_of(ex)
-        if role == "primary" and r not in ("primary", "aux"):
-            continue
-        if role == "aux" and r == "isolation":
-            continue
-        if role == "isolation" and r == "primary":
-            continue
-        pool.append(ex)
-    if not pool and groups:
-        for ex in db.real_named():
-            if (ex.get("group") or "").strip() in groups:
-                pool.append(ex)
-    if not pool and groups:
-        for ex in db.real_named():
-            g = (ex.get("group") or "").strip()
-            if g in groups:
-                pool.append(ex)
-    return pool
+def _pool_for_groups(catalog: List[Dict[str, Any]], groups: List[str], taken_ids: Set[str]) -> List[Dict[str, Any]]:
+    want = set(groups)
+    pool = [ex for ex in catalog if ex["id"] not in taken_ids and ex.get("_cg") in want]
+    if not pool:
+        return []
+    real = [ex for ex in pool if not ex.get("_ph")]
+    return real or pool
 
 
-def _pick_relaxed(
-    db: ExerciseDB,
+def pick_from_groups(
+    catalog: List[Dict[str, Any]],
     groups: List[str],
     taken_ids: Set[str],
-    used_groups: Set[str],
+    *,
+    history: Set[str],
+    last_sess: Set[str],
+    fav: Set[str],
 ) -> Optional[Dict[str, Any]]:
-    for g in groups or list(FB_GROUP_ORDER):
-        if used_groups and g in used_groups:
-            continue
-        for ex in db.real_named():
-            if ex["id"] in taken_ids:
-                continue
-            if (ex.get("group") or "").strip() == g:
-                return ex
-    for g in FB_GROUP_ORDER:
-        if g in used_groups:
-            continue
-        for ex in db.real_named():
-            if ex["id"] in taken_ids:
-                continue
-            if (ex.get("group") or "").strip() == g:
-                return ex
-    for ex in db.real_named():
-        if ex["id"] not in taken_ids:
-            return ex
-    return None
+    pool = _pool_for_groups(catalog, groups, taken_ids)
+    if not pool:
+        return None
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for ex in pool:
+        s = 0.0
+        if ex["id"] in last_sess:
+            s -= 1.5
+        if ex["id"] in history:
+            s -= 0.8
+        if ex["id"] in fav:
+            s += 1.0
+        if ex.get("_ph"):
+            s -= 3.0
+        s += random.uniform(0, 0.2)
+        scored.append((s, ex))
+    scored.sort(key=lambda x: -x[0])
+    return scored[0][1]
 
 
 def _plan_weight(ex: Dict[str, Any]) -> Optional[float]:
@@ -211,55 +261,19 @@ def _score_ex(
     return score
 
 
-def pick_for_slot(
-    db: ExerciseDB,
-    groups: List[str],
-    role: str,
-    *,
-    taken_ids: Set[str],
-    history: Set[str],
-    last_sess: Set[str],
-    fav: Set[str],
-    fav_count: int,
-    fav_primary_count: int,
-    soft_session: bool,
-) -> Optional[Dict[str, Any]]:
-    pool = [ex for ex in _pool_for_slot(db, groups, role) if ex["id"] not in taken_ids]
-    if not pool:
-        return None
-    max_fav_day = 2 if not soft_session else 1
-    max_fav_primary = 1
-
-    def capped_fav_remaining() -> int:
-        return max(0, max_fav_day - fav_count)
-
-    scored: List[Tuple[float, Dict[str, Any]]] = []
-    for ex in pool:
-        fc = fav_count
-        if ex["id"] in fav and capped_fav_remaining() <= 0:
-            s = -50.0
-        elif ex["id"] in fav and role == "primary" and fav_primary_count >= max_fav_primary:
-            s = -50.0
-        else:
-            s = _score_ex(
-                ex,
-                history=history,
-                last_sess=last_sess,
-                fav=fav,
-                fav_count=fav_count if ex["id"] in fav else fav_count,
-                max_fav=max_fav_day,
-                role=role,
-                soft_session=soft_session,
-            )
-        scored.append((s, ex))
-    scored.sort(key=lambda x: -x[0])
-    best = scored[0]
-    if best[0] < -10:
-        # force non-favorite if possible
-        for s, ex in scored:
-            if ex["id"] not in fav and s > -10:
-                return ex
-    return best[1] if best[0] > -10 else scored[0][1] if scored else None
+def _append_plan_ex(exercises: List[Dict[str, Any]], ex: Dict[str, Any], slot: Dict[str, Any]) -> None:
+    exercises.append(
+        {
+            "exercise_id": ex["id"],
+            "name": ex["name"],
+            "original": ex["name"],
+            "sets": slot.get("sets", 3),
+            "reps_target": slot.get("reps", 10),
+            "weight_kg": _plan_weight(ex),
+            "role": slot.get("role", "aux"),
+            "group": ex.get("_cg") or canonical_group(ex),
+        }
+    )
 
 
 def build_day_plan(
@@ -274,53 +288,41 @@ def build_day_plan(
     history = history_ids_for_day(day_key)
     last_sess = last_session_ids()
     fav = load_favorite_ids()
+    catalog = _catalog(db)
     taken: Set[str] = set()
-    fav_count = 0
-    fav_primary = 0
     exercises: List[Dict[str, Any]] = []
     used_groups: Set[str] = set()
+    fav_count = 0
+    max_fav = 1 if soft_session else 2
 
     for slot in day_tpl["slots"]:
-        ex = pick_for_slot(
-            db,
-            slot["groups"],
-            slot["role"],
-            taken_ids=taken,
+        groups = list(slot["groups"])
+        if split == "full":
+            groups = [g for g in groups if g not in used_groups] or groups
+        ex = pick_from_groups(
+            catalog,
+            groups,
+            taken,
             history=history,
             last_sess=last_sess,
-            fav=fav,
-            fav_count=fav_count,
-            fav_primary_count=fav_primary,
-            soft_session=soft_session,
+            fav=fav if fav_count < max_fav else set(),
         )
-        if not ex:
-            ex = _pick_relaxed(db, slot["groups"], taken, used_groups)
+        if not ex and split == "full":
+            leftover = [g for g in FB_GROUP_ORDER if g not in used_groups]
+            ex = pick_from_groups(
+                catalog, leftover, taken, history=history, last_sess=last_sess, fav=set()
+            )
         if not ex:
             continue
-        g = (ex.get("group") or "").strip()
-        if split == "full" and g and g in used_groups and len(slot["groups"]) == 1:
-            alt = _pick_relaxed(db, [g for g in FB_GROUP_ORDER if g not in used_groups], taken, used_groups)
-            if alt:
-                ex = alt
-                g = (ex.get("group") or "").strip()
+        g = ex.get("_cg") or canonical_group(ex)
+        if split == "full" and g in used_groups:
+            continue
         taken.add(ex["id"])
         if g:
             used_groups.add(g)
         if ex["id"] in fav:
             fav_count += 1
-            if slot["role"] == "primary":
-                fav_primary += 1
-        exercises.append(
-            {
-                "exercise_id": ex["id"],
-                "name": ex["name"],
-                "original": ex["name"],
-                "sets": slot.get("sets", 3),
-                "reps_target": slot.get("reps", 10),
-                "weight_kg": _plan_weight(ex),
-                "role": slot["role"],
-            }
-        )
+        _append_plan_ex(exercises, ex, slot)
 
     warmup = WARMUP_BY_SPLIT.get(split, WARMUP_BY_SPLIT["full"])
     title = f"{day_tpl['title_base']}: рабочий день"

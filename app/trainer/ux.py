@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from app.trainer.exercise_db import ExerciseDB
 from app.trainer.favorites import is_favorite
-from app.trainer.program import SPLIT_LABELS
+from app.trainer.program import SPLIT_LABELS, canonical_group
 
 
 def is_bodyweight_ex(ex: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> bool:
@@ -131,11 +131,11 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     order: List[str] = []
     for ex in exs:
-        grp = ""
-        if db and ex.get("exercise_id"):
+        grp = (ex.get("group") or "").strip()
+        if not grp and db and ex.get("exercise_id"):
             row = db.by_id.get(ex["exercise_id"])
             if row:
-                grp = row.get("group") or ""
+                grp = canonical_group(row)
         label = grp or "Блок"
         if label not in grouped:
             grouped[label] = []

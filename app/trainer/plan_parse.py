@@ -131,6 +131,7 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
                 "sets": 3,
                 "reps_target": 10,
                 "weight_kg": 0.0 if ExerciseDB.is_bodyweight(e) else None,
+                "group": e.get("group") or "",
             }
             for e in picked[:8]
         ],
@@ -156,13 +157,26 @@ async def generate_workout_plan(
             return local
         return {"exercises": [], "error": "пустой каталог упражнений"}
     mapped = day["exercises"]
-    extra = await _coach_fields_for_plan(mapped, f"{scheme} {day.get('split', '')}")
-    if extra.get("title"):
+    groups = ", ".join(sorted({e.get("group") or "" for e in mapped if e.get("group")}))
+    extra = await _coach_fields_for_plan(
+        mapped,
+        f"{scheme} {day.get('split', '')}. Группы в плане: {groups or 'разные'}. "
+        "Это НЕ тренировка только на ноги, если в списке есть спина/грудь/плечи.",
+    )
+    if extra.get("title") and day.get("split") != "full":
         day["title"] = extra["title"]
+    elif extra.get("title") and day.get("split") == "full":
+        t = extra["title"].lower()
+        if not any(w in t for w in ("нижн", "ног", "ягодиц")):
+            day["title"] = extra["title"]
     if extra.get("warmup_note"):
         day["warmup_note"] = extra["warmup_note"]
     if extra.get("coach_note"):
-        day["coach_note"] = extra["coach_note"]
+        c = extra["coach_note"].lower()
+        if day.get("split") == "full" and "ног" in c and "спин" not in c and "груд" not in c:
+            pass
+        else:
+            day["coach_note"] = extra["coach_note"]
     day["cycle"] = cycle
     return day
 
