@@ -139,8 +139,11 @@ def create_app() -> web.Application:
     nutrition_wh.register(app, path="/webhook/nutrition")
 
     async def health(_):
-        status = "ok" if _BOOT_WEBHOOKS_OK else "ok (webhooks pending)"
-        return web.Response(text=status)
+        if _BOOT_WEBHOOKS_OK:
+            body = "ok"
+        else:
+            body = "ok (webhooks pending)"
+        return web.Response(text=body)
 
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -155,13 +158,29 @@ def create_app() -> web.Application:
         wh_kw = {}
         if secret:
             wh_kw["secret_token"] = secret
+            logger.info("WIFE_WEBHOOK_SECRET is set — Telegram must send X-Telegram-Bot-Api-Secret-Token")
+        try:
+            me_t = await bot_trainer.get_me()
+            me_n = await bot_nutrition.get_me()
+            logger.info("Bots online: @%s @%s", me_t.username, me_n.username)
+        except Exception as e:
+            logger.exception("getMe failed: %s", e)
+            return
         try:
             await bot_trainer.set_webhook(
-                f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw
+                f"{base}/webhook/trainer", drop_pending_updates=False, **wh_kw
             )
             await bot_nutrition.set_webhook(
-                f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw
+                f"{base}/webhook/nutrition", drop_pending_updates=False, **wh_kw
             )
+            for label, bot in (("trainer", bot_trainer), ("nutrition", bot_nutrition)):
+                try:
+                    info = await bot.get_webhook_info()
+                    err = getattr(info, "last_error_message", None) or ""
+                    if err:
+                        logger.warning("webhook %s last_error: %s", label, err)
+                except Exception:
+                    pass
             _BOOT_WEBHOOKS_OK = True
             logger.info(
                 "Webhooks set: %s/webhook/trainer|nutrition (acl ids=%s)",
@@ -179,11 +198,7 @@ def create_app() -> web.Application:
         asyncio.create_task(_boot_background())
 
     async def _cleanup(_):
-        try:
-            await bot_trainer.delete_webhook(drop_pending_updates=False)
-            await bot_nutrition.delete_webhook(drop_pending_updates=False)
-        except Exception:
-            pass
+        # Do not delete_webhook on Render deploy — old instance can race new instance and mute bots.
         await bot_trainer.session.close()
         await bot_nutrition.session.close()
 
