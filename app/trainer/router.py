@@ -585,11 +585,6 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     idx = int(data.get("cur_idx", -1))
     if idx < 0:
-        if message.text and not message.text.startswith("/"):
-            if not data.get("warmup_done"):
-                await message.answer("Сначала разминка — кнопки выше 🫧")
-            else:
-                await message.answer("Выбери упражнение кнопкой в списке выше 📌")
         return
     sess: List[Dict[str, Any]] = data["session"]
     if idx >= len(sess):
