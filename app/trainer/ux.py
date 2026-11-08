@@ -7,6 +7,12 @@ from app.trainer.favorites import is_favorite
 from app.trainer.program import SPLIT_LABELS
 
 
+def is_bodyweight_ex(ex: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> bool:
+    if ExerciseDB.is_bodyweight(base or {}):
+        return True
+    return ExerciseDB.is_bodyweight({"name": ex.get("name"), "equipment": ""})
+
+
 def _h(text: str) -> str:
     return html.escape(str(text or ""), quote=False)
 
@@ -140,7 +146,12 @@ def format_plan_message(plan: Dict[str, Any], db: Optional[ExerciseDB] = None) -
         lines.append(f"{em} <b>{_h(label)}</b>")
         for ex in grouped[label]:
             w = ex.get("weight_kg")
-            wpart = f", ориентир <b>{w:g} кг</b>" if w else ""
+            if w is not None and float(w) == 0:
+                wpart = " · <b>0×</b>"
+            elif w:
+                wpart = f", ориентир <b>{w:g} кг</b>"
+            else:
+                wpart = ""
             star = "★ " if is_favorite(str(ex.get("exercise_id", ""))) else ""
             lines.append(
                 f"  • {star}{_h(ex['name'])} — <b>{ex.get('sets', 3)}×{ex.get('reps_target', 10)}</b>{wpart}"
@@ -172,8 +183,17 @@ def exercise_card(
     tgt = int(ex.get("target_sets") or 3)
     reps = ex.get("reps_target") or 10
     wplan = ex.get("weight_kg_plan")
+    if wplan is None and ex.get("weight_kg") is not None:
+        wplan = ex.get("weight_kg")
     progress = "▓" * done + "░" * max(0, tgt - done)
-    hint = f"ориентир <b>{wplan:g} кг</b> × {reps}" if wplan else f"ориентир <b>{reps}</b> повторов"
+    if wplan is not None and float(wplan) == 0:
+        hint = f"ориентир <b>0</b> × {reps}"
+    elif wplan:
+        hint = f"ориентир <b>{float(wplan):g} кг</b> × {reps}"
+    elif is_bodyweight_ex(ex, base):
+        hint = f"ориентир <b>0</b> × {reps}"
+    else:
+        hint = f"ориентир <b>{reps}</b> повторов (или <code>0×{reps}</code>)"
     grp = (base.get("group") if base else "") or ""
     equip = (base.get("equipment") if base else "") or ""
     meta_parts = [p for p in (grp, equip) if p]
@@ -191,7 +211,8 @@ def exercise_card(
     ]
     if tech_line:
         body.append(f"<i>{_h(tech_line)}</i>")
-    body.append("✍️ Результат: <code>40×10</code> или «40 кг 10 раз» · тяжесть: <code>40×10, 7</code>")
+    ex_hint = "<code>0×10</code>" if (wplan == 0 or is_bodyweight_ex(ex, base)) else "<code>40×10</code>"
+    body.append(f"✍️ Результат: {ex_hint} или «40 кг 10 раз» · тяжесть: <code>{'0×10, 7' if wplan == 0 else '40×10, 7'}</code>")
     body.append("Кнопка <b>Техника</b> — полное объяснение.")
     return "\n".join(body)
 
@@ -224,7 +245,10 @@ def praise_after_set(
     set_i: int,
     target_sets: int,
 ) -> str:
-    core = f"✅ Записала: <b>{weight:g} кг × {reps:g}</b>"
+    if weight <= 0:
+        core = f"✅ Записала: <b>0 × {reps:g}</b>"
+    else:
+        core = f"✅ Записала: <b>{weight:g} кг × {reps:g}</b>"
     if difficulty is not None:
         core += f", тяжесть <b>{difficulty}/10</b>"
         if difficulty <= 3:

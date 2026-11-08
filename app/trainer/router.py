@@ -92,6 +92,7 @@ def parse_set_local(text: str) -> Optional[Dict[str, float]]:
     m = re.search(
         r"(\d{1,3}(?:\.\d+)?)\s*(?:кг|kg)?\s*[x×*хX]\s*(\d{1,3}(?:\.\d+)?)(?:\s*[,;/]\s*(\d{1,2}))?",
         s,
+        re.I,
     )
     if m:
         out: Dict[str, float] = {"weight": float(m.group(1)), "reps": float(m.group(2))}
@@ -106,6 +107,16 @@ def parse_set_local(text: str) -> Optional[Dict[str, float]]:
     m = re.search(r"(\d{1,3}(?:\.\d+)?)\s+(?:на|по)\s+(\d{1,3})", s, re.I)
     if m:
         return {"weight": float(m.group(1)), "reps": float(m.group(2))}
+    m = re.search(r"(?:^|[\s])(\d{1,3})\s*[,;/]\s*(\d{1,2})\s*$", s)
+    if m:
+        r, d = int(m.group(1)), int(m.group(2))
+        if 1 <= d <= 10:
+            return {"weight": 0.0, "reps": float(r), "difficulty": float(d)}
+    m = re.search(r"^[x×*]\s*(\d{1,3})$", s, re.I)
+    if m:
+        return {"weight": 0.0, "reps": float(m.group(1))}
+    if re.fullmatch(r"\d{1,3}", s):
+        return {"weight": 0.0, "reps": float(s)}
     return None
 
 
@@ -431,6 +442,30 @@ async def _show_picker(message: types.Message, state: FSMContext) -> None:
     )
 
 
+async def _after_set_logged(
+    message: types.Message,
+    state: FSMContext,
+    idx: int,
+    praise: str,
+    *,
+    ask_difficulty: bool = False,
+    set_i: int = 0,
+) -> None:
+    rest_note = (
+        praise
+        + "\n\n<i>Отдых — по желанию (таймер ниже). Следующий подход можно писать сразу в карточке 👇</i>"
+    )
+    if ask_difficulty:
+        await message.answer(
+            praise + "\n\nНасколько тяжело было <b>(1–10)</b>?",
+            reply_markup=scale_set_difficulty_kb(idx, set_i),
+        )
+        return
+    timer_id = f"{idx}_{set_i}_{random.randint(1000, 9999)}"
+    await message.answer(rest_note, reply_markup=rest_kb(timer_id, ex_idx=idx))
+    await _show_exercise(message, state)
+
+
 async def _kb_for_exercise(state: FSMContext, ex_idx: int) -> InlineKeyboardMarkup:
     data = await state.get_data()
     sess = data.get("session") or []
@@ -457,8 +492,13 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
         await call.message.answer("План пуст. Составим новый?", reply_markup=plan_menu_kb())
         return
     started = now_local().isoformat()
+    db = await ExerciseDB.load()
     sess: List[Dict[str, Any]] = []
     for ex in exercises:
+        w = ex.get("weight_kg")
+        base = db.by_id.get(ex.get("exercise_id", ""))
+        if w is None and (ExerciseDB.is_bodyweight(base) or ExerciseDB.is_bodyweight({"name": ex.get("name")})):
+            w = 0
         sess.append(
             {
                 "exercise_id": ex["exercise_id"],
@@ -466,7 +506,7 @@ async def cb_begin_session(call: types.CallbackQuery, state: FSMContext):
                 "sets": [],
                 "target_sets": ex.get("sets", 3),
                 "reps_target": ex.get("reps_target", 10),
-                "weight_kg_plan": ex.get("weight_kg"),
+                "weight_kg_plan": w,
             }
         )
     pending = list(range(len(sess)))
@@ -617,16 +657,20 @@ async def msg_set_input(message: types.Message, state: FSMContext, bot: Bot):
     si = len(ex["sets"]) - 1
     tgt = int(ex.get("target_sets") or 3)
     if row.get("difficulty"):
-        await message.answer(
-            praise_after_set(parsed["weight"], parsed["reps"], int(row["difficulty"]), si, tgt)
-            + "\n\n⏱ Сколько отдыхаем?",
-            reply_markup=rest_kb("r", ex_idx=idx),
+        await _after_set_logged(
+            message,
+            state,
+            idx,
+            praise_after_set(parsed["weight"], parsed["reps"], int(row["difficulty"]), si, tgt),
         )
         return
-    await message.answer(
-        praise_after_set(parsed["weight"], parsed["reps"], None, si, tgt)
-        + "\n\nНасколько тяжело было <b>(1–10)</b>?",
-        reply_markup=scale_set_difficulty_kb(idx, si),
+    await _after_set_logged(
+        message,
+        state,
+        idx,
+        praise_after_set(parsed["weight"], parsed["reps"], None, si, tgt),
+        ask_difficulty=True,
+        set_i=si,
     )
 
 
@@ -640,7 +684,16 @@ async def cb_set_diff(call: types.CallbackQuery, state: FSMContext):
     if si < len(ex["sets"]):
         ex["sets"][si]["difficulty"] = diff
     await state.update_data(session=sess)
-    await call.message.answer("⏱ Сколько отдыхаем?", reply_markup=rest_kb("r", ex_idx=idx))
+    tgt = int(ex.get("target_sets") or 3)
+    last = ex["sets"][si]
+    praise = praise_after_set(
+        float(last.get("weight", 0)),
+        float(last.get("reps", 0)),
+        int(diff),
+        si,
+        tgt,
+    )
+    await _after_set_logged(call.message, state, idx, praise)
     await call.answer()
 
 
@@ -669,6 +722,18 @@ async def cb_rest(call: types.CallbackQuery, state: FSMContext):
             pass
 
     asyncio.create_task(ping())
+
+
+@trainer_router.callback_query(F.data.startswith("tr_rest_skip:"))
+async def cb_rest_skip(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except Exception:
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await call.answer("Ок, без таймера")
 
 
 @trainer_router.callback_query(F.data.startswith("tr_skip_set:"))

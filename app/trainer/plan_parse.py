@@ -108,7 +108,7 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
     for ex in pool:
         by_g.setdefault(ex.get("group") or "Прочее", []).append(ex)
     picked = []
-    for g in ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Ягодицы", "Пресс"):
+    for g in ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Пресс", "Ягодицы"):
         if by_g.get(g):
             picked.append(by_g[g][0])
         if len(picked) >= 6:
@@ -130,7 +130,7 @@ def _local_fullbody_plan(db: ExerciseDB) -> Dict[str, Any]:
                 "original": e["name"],
                 "sets": 3,
                 "reps_target": 10,
-                "weight_kg": None,
+                "weight_kg": 0.0 if ExerciseDB.is_bodyweight(e) else None,
             }
             for e in picked[:8]
         ],

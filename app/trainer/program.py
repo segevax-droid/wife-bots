@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.state import SYSTEM_STATE
 from app.trainer.exercise_db import ExerciseDB
+
+FB_GROUP_ORDER = ("Ноги", "Спина", "Грудь", "Плечи", "Руки", "Кор", "Пресс", "Ягодицы")
 from app.trainer.favorites import load_favorite_ids
 
 HISTORY_KEY = "plan_history_json"
@@ -27,7 +29,7 @@ DAY_TEMPLATES: Dict[str, List[Dict[str, Any]]] = {
                 {"groups": ["Спина"], "role": "primary", "sets": 3, "reps": 10},
                 {"groups": ["Грудь"], "role": "primary", "sets": 3, "reps": 10},
                 {"groups": ["Плечи"], "role": "aux", "sets": 3, "reps": 12},
-                {"groups": ["Ягодицы", "Ноги"], "role": "aux", "sets": 3, "reps": 12},
+                {"groups": ["Руки"], "role": "aux", "sets": 3, "reps": 12},
                 {"groups": ["Кор", "Пресс"], "role": "isolation", "sets": 3, "reps": 15},
             ],
         }
@@ -138,7 +140,46 @@ def _pool_for_slot(db: ExerciseDB, groups: List[str], role: str) -> List[Dict[st
         for ex in db.real_named():
             if (ex.get("group") or "").strip() in groups:
                 pool.append(ex)
+    if not pool and groups:
+        for ex in db.real_named():
+            g = (ex.get("group") or "").strip()
+            if g in groups:
+                pool.append(ex)
     return pool
+
+
+def _pick_relaxed(
+    db: ExerciseDB,
+    groups: List[str],
+    taken_ids: Set[str],
+    used_groups: Set[str],
+) -> Optional[Dict[str, Any]]:
+    for g in groups or list(FB_GROUP_ORDER):
+        if used_groups and g in used_groups:
+            continue
+        for ex in db.real_named():
+            if ex["id"] in taken_ids:
+                continue
+            if (ex.get("group") or "").strip() == g:
+                return ex
+    for g in FB_GROUP_ORDER:
+        if g in used_groups:
+            continue
+        for ex in db.real_named():
+            if ex["id"] in taken_ids:
+                continue
+            if (ex.get("group") or "").strip() == g:
+                return ex
+    for ex in db.real_named():
+        if ex["id"] not in taken_ids:
+            return ex
+    return None
+
+
+def _plan_weight(ex: Dict[str, Any]) -> Optional[float]:
+    if ExerciseDB.is_bodyweight(ex):
+        return 0.0
+    return None
 
 
 def _score_ex(
@@ -237,6 +278,7 @@ def build_day_plan(
     fav_count = 0
     fav_primary = 0
     exercises: List[Dict[str, Any]] = []
+    used_groups: Set[str] = set()
 
     for slot in day_tpl["slots"]:
         ex = pick_for_slot(
@@ -252,8 +294,18 @@ def build_day_plan(
             soft_session=soft_session,
         )
         if not ex:
+            ex = _pick_relaxed(db, slot["groups"], taken, used_groups)
+        if not ex:
             continue
+        g = (ex.get("group") or "").strip()
+        if split == "full" and g and g in used_groups and len(slot["groups"]) == 1:
+            alt = _pick_relaxed(db, [g for g in FB_GROUP_ORDER if g not in used_groups], taken, used_groups)
+            if alt:
+                ex = alt
+                g = (ex.get("group") or "").strip()
         taken.add(ex["id"])
+        if g:
+            used_groups.add(g)
         if ex["id"] in fav:
             fav_count += 1
             if slot["role"] == "primary":
@@ -265,7 +317,7 @@ def build_day_plan(
                 "original": ex["name"],
                 "sets": slot.get("sets", 3),
                 "reps_target": slot.get("reps", 10),
-                "weight_kg": None,
+                "weight_kg": _plan_weight(ex),
                 "role": slot["role"],
             }
         )

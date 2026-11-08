@@ -128,6 +128,26 @@ class ExerciseDB:
                     pool.append(other)
         return pool[: max(limit, 30)]
 
+    @staticmethod
+    def is_bodyweight(ex: Optional[Dict[str, Any]]) -> bool:
+        if not ex:
+            return False
+        name = (ex.get("name") or "").lower()
+        equip = (ex.get("equipment") or "").lower()
+        if any(
+            p in name
+            for p in (
+                "без веса",
+                "собственн",
+                "своим весом",
+                "свой вес",
+            )
+        ):
+            return True
+        if any(p in equip for p in ("свой вес", "без веса", "bodyweight")):
+            return True
+        return False
+
     def real_named(self) -> List[Dict[str, Any]]:
         """Prefer exercises that look like real names, not 'Группа — упражнение N'."""
         out = []

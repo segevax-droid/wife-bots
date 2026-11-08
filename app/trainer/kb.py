@@ -107,11 +107,12 @@ def post_ex_fav_kb(ex_idx: int) -> InlineKeyboardMarkup:
 
 def rest_kb(timer_id: str, ex_idx: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
-            [
-                InlineKeyboardButton(text="⏱ 60с", callback_data=f"tr_rest:{timer_id}:60"),
-                InlineKeyboardButton(text="⏱ 90с", callback_data=f"tr_rest:{timer_id}:90"),
-                InlineKeyboardButton(text="⏱ 120с", callback_data=f"tr_rest:{timer_id}:120"),
-            ],
+        [
+            InlineKeyboardButton(text="⏱ 60с", callback_data=f"tr_rest:{timer_id}:60"),
+            InlineKeyboardButton(text="⏱ 90с", callback_data=f"tr_rest:{timer_id}:90"),
+            InlineKeyboardButton(text="⏱ 120с", callback_data=f"tr_rest:{timer_id}:120"),
+        ],
+        [InlineKeyboardButton(text="⏭ Без таймера", callback_data=f"tr_rest_skip:{timer_id}")],
     ]
     if ex_idx is not None:
         rows.append(_back_row(f"tr_back_ex:{ex_idx}"))
