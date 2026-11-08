@@ -150,18 +150,31 @@ def create_app() -> web.Application:
 
     base = WIFE_RENDER_EXTERNAL_URL.rstrip("/")
 
-    async def _boot_background():
-        global _BOOT_WEBHOOKS_OK
+    async def _set_webhooks() -> bool:
         wh_kw = {}
         if secret:
             wh_kw["secret_token"] = secret
+        await bot_trainer.set_webhook(
+            f"{base}/webhook/trainer", drop_pending_updates=False, **wh_kw
+        )
+        await bot_nutrition.set_webhook(
+            f"{base}/webhook/nutrition", drop_pending_updates=False, **wh_kw
+        )
+        return True
+
+    async def _boot_background():
+        global _BOOT_WEBHOOKS_OK
+        if secret:
+            logger.info("WIFE_WEBHOOK_SECRET set — header must match on Telegram POSTs")
         try:
-            await bot_trainer.set_webhook(
-                f"{base}/webhook/trainer", drop_pending_updates=True, **wh_kw
-            )
-            await bot_nutrition.set_webhook(
-                f"{base}/webhook/nutrition", drop_pending_updates=True, **wh_kw
-            )
+            me_t = await bot_trainer.get_me()
+            me_n = await bot_nutrition.get_me()
+            logger.info("Bots online: @%s @%s", me_t.username, me_n.username)
+        except Exception as e:
+            logger.exception("getMe failed: %s", e)
+            return
+        try:
+            await _set_webhooks()
             _BOOT_WEBHOOKS_OK = True
             logger.info(
                 "Webhooks set: %s/webhook/trainer|nutrition (acl ids=%s)",
@@ -171,6 +184,16 @@ def create_app() -> web.Application:
         except Exception as e:
             logger.exception("set_webhook failed: %s", e)
             return
+
+        async def _webhook_again_after_deploy_race():
+            await asyncio.sleep(25)
+            try:
+                await _set_webhooks()
+                logger.info("Webhooks re-registered (deploy race guard)")
+            except Exception as e:
+                logger.warning("webhook retry: %s", e)
+
+        asyncio.create_task(_webhook_again_after_deploy_race())
         await _sheets_warmup()
         asyncio.create_task(background_loop(bot_trainer, bot_nutrition))
 
@@ -179,11 +202,7 @@ def create_app() -> web.Application:
         asyncio.create_task(_boot_background())
 
     async def _cleanup(_):
-        try:
-            await bot_trainer.delete_webhook(drop_pending_updates=False)
-            await bot_nutrition.delete_webhook(drop_pending_updates=False)
-        except Exception:
-            pass
+        # Never delete_webhook on Render shutdown — old pod can race new pod and mute bots.
         await bot_trainer.session.close()
         await bot_nutrition.session.close()
 
