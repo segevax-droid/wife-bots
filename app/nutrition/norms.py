@@ -33,10 +33,10 @@ def bmr_mifflin(kg: float, cm: float, age: int, sex: str) -> float:
 
 
 def _macros_with_bonus(weight_kg: float, target_kcal: float, bonus_kcal: float) -> Tuple[float, float, float]:
-    prot_g_kg_min, prot_g_kg_max = 1.6, 2.0
+    prot_g_kg_target, prot_g_kg_min, prot_g_kg_max = 1.5, 1.4, 1.8
     fat_g_kg_min, fat_g_kg_max = 0.8, 1.0
     w = weight_kg
-    protein = min(max(1.8 * w, prot_g_kg_min * w), prot_g_kg_max * w)
+    protein = min(max(prot_g_kg_target * w, prot_g_kg_min * w), prot_g_kg_max * w)
     fat = min(max(0.9 * w, fat_g_kg_min * w), fat_g_kg_max * w)
     kcal_pf = protein * 4 + fat * 9
     carb_kcal = max(target_kcal - kcal_pf, 0)
