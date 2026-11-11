@@ -3,6 +3,7 @@ from typing import Optional
 
 from aiogram import Bot
 
+from app.dnd import is_dnd_active
 from app.state import SYSTEM_STATE, load_state_from_sheet, now_local, save_state_pairs
 from app.trainer.kb import reminder_train_kb
 
@@ -15,6 +16,8 @@ def _parse_iso(d: str) -> Optional[date]:
 
 
 async def maybe_send_workout_reminders(bot_trainer: Bot) -> None:
+    if await is_dnd_active():
+        return
     await load_state_from_sheet()
     cid = SYSTEM_STATE.get("chat_Trainer")
     if not cid:

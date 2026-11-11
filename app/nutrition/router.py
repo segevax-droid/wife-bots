@@ -11,6 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.common import record_user_chat
+from app.dnd import attach_dnd_handlers
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.nutrition.food import log_meal_row, parse_meal_grams, resolve_staple_macros, sanity
 from app.nutrition.norms import load_norm_targets, recalc_norms_for_user, today_intake
@@ -39,6 +40,7 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💰 Копилка дня", callback_data="nut_bank")],
         [InlineKeyboardButton(text="🛒 Список покупок", callback_data="nut_shop")],
         [InlineKeyboardButton(text="👤 Профиль заново", callback_data="nut_onboard")],
+        [InlineKeyboardButton(text="🌙 Не беспокоить", callback_data="nut_dnd")],
         [InlineKeyboardButton(text="🤖 Проверить Gemini", callback_data="check_gemini_quota")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -376,3 +378,6 @@ async def cb_shop(call: types.CallbackQuery):
     s = await get_settings_map()
     prompt = f"Список покупок на ~4 дня, кратко маркированный. Цель: {s.get('goal')}. Недавние приёмы:\n{sample}"
     await call.message.answer(await call_gemini(prompt))
+
+
+attach_dnd_handlers(nutrition_router, prefix="nut", main_menu_kb=_main_kb)

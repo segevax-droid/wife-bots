@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 from aiogram import Bot
 
 from app.config import WIFE_MEAL_REMINDER_TIMES
+from app.dnd import is_dnd_active
 from app.nutrition.norms import recalc_norms_for_user
 from app.sheets import get_settings_map
 from app.state import SYSTEM_STATE, load_state_from_sheet, now_local, save_state_pairs
@@ -25,6 +26,8 @@ def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
 
 
 async def _tick_morning_weigh(bot_nutrition: Bot) -> None:
+    if await is_dnd_active():
+        return
     await load_state_from_sheet()
     cid = SYSTEM_STATE.get("chat_Nutrition")
     if not cid:
@@ -50,6 +53,8 @@ async def _tick_morning_weigh(bot_nutrition: Bot) -> None:
 
 
 async def _tick_meal_reminders(bot_nutrition: Bot, hh: int, mm: int) -> None:
+    if await is_dnd_active():
+        return
     if not WIFE_MEAL_REMINDER_TIMES:
         return
     cid = SYSTEM_STATE.get("chat_Nutrition")
@@ -72,6 +77,8 @@ async def _tick_meal_reminders(bot_nutrition: Bot, hh: int, mm: int) -> None:
 
 
 async def _daily_norms(bot_nutrition: Bot) -> None:
+    if await is_dnd_active():
+        return
     await load_state_from_sheet()
     key = f"remind_norms_{now_local().strftime('%Y-%m-%d')}"
     if SYSTEM_STATE.get(key) == "1":

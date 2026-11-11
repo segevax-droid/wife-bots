@@ -5,6 +5,7 @@ from aiogram import Bot, F, Router, types
 
 from app.config import WIFE_ALLOWED_CHAT_IDS
 from app.gemini import ping_gemini_quota
+from app.dnd import is_dnd_active
 from app.state import SYSTEM_STATE, save_state_pairs
 
 logger = logging.getLogger("wife_bots")
@@ -16,6 +17,8 @@ def is_allowed_chat(chat_id: int) -> bool:
 
 
 async def send_cross_notification(from_role: str, text: str, trainer_bot: Bot, nutrition_bot: Bot) -> None:  # noqa: D401
+    if await is_dnd_active():
+        return
     if from_role == "trainer":
         cid = SYSTEM_STATE.get("chat_Nutrition")
         bot = nutrition_bot

@@ -18,6 +18,7 @@ def trainer_main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📆 Неделя", callback_data="tr_rep_w"),
             InlineKeyboardButton(text="📊 Месяц", callback_data="tr_rep_m"),
         ],
+        [InlineKeyboardButton(text="🌙 Не беспокоить", callback_data="tr_dnd")],
         [
             InlineKeyboardButton(text="🤖 Gemini", callback_data="check_gemini_quota"),
             InlineKeyboardButton(text="↩️ Сброс", callback_data="tr_reset_session"),

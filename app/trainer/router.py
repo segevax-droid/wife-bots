@@ -15,6 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.common import record_user_chat, send_cross_notification
+from app.dnd import attach_dnd_handlers
 from app.config import BONUS_CARB_FRAC, WIFE_NUTRITION_TOKEN
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.sheets import append_row_to_sheet, get_settings_map, set_setting
@@ -1175,3 +1176,6 @@ async def cb_rm_light(call: types.CallbackQuery):
 @trainer_router.callback_query(F.data == "tr_rm_no")
 async def cb_rm_no(call: types.CallbackQuery):
     await call.answer()
+
+
+attach_dnd_handlers(trainer_router, prefix="tr", main_menu_kb=trainer_main_kb)
