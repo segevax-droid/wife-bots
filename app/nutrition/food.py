@@ -2,13 +2,14 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus
 
 from aiohttp import ClientSession, ClientTimeout
 
 from app.gemini import call_gemini
-from app.sheets import append_row_to_sheet, get_worksheet, get_ws_values
+from app.sheets import append_row_to_sheet, delete_sheet_row, get_worksheet, get_ws_values
 from app.state import now_local
 
 logger = logging.getLogger("wife_bots")
@@ -161,13 +162,117 @@ async def parse_meal_grams(text: str) -> Tuple[str, float]:
         return text.strip(), 100.0
 
 
-async def log_meal_row(staple: str, grams: float, m: Dict[str, float]) -> Tuple[float, float, float, float]:
+def new_meal_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _cell(row: List[str], idx: int) -> str:
+    return str(row[idx]).strip() if len(row) > idx else ""
+
+
+def _meal_id_from_row(row: List[str]) -> str:
+    comment = _cell(row, 8)
+    if re.fullmatch(r"[0-9a-f]{8}", comment, re.I):
+        return comment.lower()
+    return ""
+
+
+def _parse_meal_row(row: List[str], sheet_row: int) -> Optional[Dict[str, Any]]:
+    name = _cell(row, 2)
+    if not name:
+        return None
+    time_raw = _cell(row, 1) or _cell(row, 0)
+    hm = re.search(r"(\d{1,2}:\d{2})", time_raw)
+    try:
+        grams = float(_cell(row, 3).replace(",", ".") or "0")
+    except Exception:
+        grams = 0.0
+    try:
+        kcal = float(_cell(row, 7).replace(",", ".") or "0")
+    except Exception:
+        kcal = 0.0
+    return {
+        "sheet_row": sheet_row,
+        "date": _cell(row, 0),
+        "time": hm.group(1) if hm else "",
+        "name": name,
+        "grams": grams,
+        "kcal": kcal,
+        "meal_id": _meal_id_from_row(row),
+    }
+
+
+async def list_today_meals() -> List[Dict[str, Any]]:
+    ws = await get_worksheet("Питание")
+    if not ws:
+        return []
+    rows = await get_ws_values(ws)
+    day = now_local().strftime("%Y-%m-%d")
+    out: List[Dict[str, Any]] = []
+    for idx, r in enumerate(rows[1:], start=2):
+        if not r or not _cell(r, 0).startswith(day):
+            continue
+        parsed = _parse_meal_row(r, idx)
+        if parsed:
+            out.append(parsed)
+    return out
+
+
+def _meal_matches_id(row: List[str], meal_id: str) -> bool:
+    return _meal_id_from_row(row) == meal_id.lower()
+
+
+async def find_meal_by_id(meal_id: str) -> Optional[Dict[str, Any]]:
+    if not meal_id:
+        return None
+    ws = await get_worksheet("Питание")
+    if not ws:
+        return None
+    rows = await get_ws_values(ws)
+    for idx, r in enumerate(rows[1:], start=2):
+        if r and _meal_matches_id(r, meal_id):
+            return _parse_meal_row(r, idx)
+    return None
+
+
+async def delete_meal(meal_id: str = "", sheet_row: int = 0) -> Optional[Dict[str, Any]]:
+    ws = await get_worksheet("Питание")
+    if not ws:
+        return None
+    rows = await get_ws_values(ws)
+    target: Optional[Dict[str, Any]] = None
+    if meal_id:
+        for idx, r in enumerate(rows[1:], start=2):
+            if r and _meal_matches_id(r, meal_id):
+                target = _parse_meal_row(r, idx)
+                break
+    elif 2 <= sheet_row <= len(rows):
+        day = now_local().strftime("%Y-%m-%d")
+        r = rows[sheet_row - 1]
+        if r and _cell(r, 0).startswith(day):
+            target = _parse_meal_row(r, sheet_row)
+    if not target:
+        return None
+    ok = await delete_sheet_row("Питание", int(target["sheet_row"]))
+    return target if ok else None
+
+
+def meal_button_label(meal: Dict[str, Any]) -> str:
+    t = meal.get("time") or ""
+    name = str(meal.get("name") or "приём")[:28]
+    grams = meal.get("grams") or 0
+    prefix = f"✕ {t} " if t else "✕ "
+    return f"{prefix}{name} {grams:.0f}г"[:64]
+
+
+async def log_meal_row(staple: str, grams: float, m: Dict[str, float]) -> Tuple[float, float, float, float, str]:
     scale = grams / 100.0
     kcal = m.get("kcal", 0) * scale
     p = m.get("p", 0) * scale
     f = m.get("f", 0) * scale
     c = m.get("c", 0) * scale
     ts = now_local().strftime("%Y-%m-%d %H:%M")
+    meal_id = new_meal_id()
     await append_row_to_sheet(
         "Питание",
         [
@@ -179,7 +284,7 @@ async def log_meal_row(staple: str, grams: float, m: Dict[str, float]) -> Tuple[
             f"{f:.1f}",
             f"{c:.1f}",
             f"{kcal:.0f}",
-            "",
+            meal_id,
         ],
     )
-    return p, f, c, kcal
+    return p, f, c, kcal, meal_id

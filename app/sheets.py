@@ -209,6 +209,45 @@ async def append_row_to_sheet(sheet_name: str, row: list) -> Tuple[bool, str]:
         return await _append_row_unlocked(sheet_name, row)
 
 
+async def _delete_row_unlocked(sheet_name: str, row_idx: int) -> bool:
+    try:
+        ws = await get_worksheet(sheet_name)
+        if not ws:
+            return False
+        raw_w = getattr(ws, "_ws", ws)
+        if hasattr(ws, "_agcm") and hasattr(raw_w, "delete_rows"):
+            await ws._agcm.execute(raw_w.delete_rows, row_idx)
+        elif hasattr(ws, "delete_rows"):
+            res = ws.delete_rows(row_idx)
+            if asyncio.iscoroutine(res):
+                await res
+        elif hasattr(raw_w, "delete_rows"):
+            await asyncio.to_thread(raw_w.delete_rows, row_idx)
+        elif hasattr(ws, "_agcm") and hasattr(raw_w, "delete_row"):
+            await ws._agcm.execute(raw_w.delete_row, row_idx)
+        elif hasattr(ws, "delete_row"):
+            res = ws.delete_row(row_idx)
+            if asyncio.iscoroutine(res):
+                await res
+        elif hasattr(raw_w, "delete_row"):
+            await asyncio.to_thread(raw_w.delete_row, row_idx)
+        else:
+            logger.error("no delete_row on worksheet %s", sheet_name)
+            return False
+        invalidate_sheet_cache(sheet_name)
+        return True
+    except Exception as e:
+        logger.error("row delete %s #%s: %s", sheet_name, row_idx, e)
+        return False
+
+
+async def delete_sheet_row(sheet_name: str, row_idx: int) -> bool:
+    if row_idx < 2:
+        return False
+    async with sheet_write_lock(sheet_name):
+        return await _delete_row_unlocked(sheet_name, row_idx)
+
+
 async def ensure_sheets() -> None:
     headers = {
         "Сессии": [
