@@ -89,7 +89,8 @@ async def gemini_macros(staple: str, off: Optional[Dict[str, Any]]) -> Tuple[Dic
     ctx = json.dumps(off or {}, ensure_ascii=False)[:800]
     prompt = (
         f"Продукт: {staple}\nДанные OFF: {ctx}\n"
-        "Верни JSON: {\"kcal\":..,\"p\":..,\"f\":..,\"c\":..} на 100г, \"confidence\":0..1."
+        "Верни JSON: {\"kcal\":..,\"p\":..,\"f\":..,\"c\":..} на 100г, \"confidence\":0..1. "
+        "Для готового блюда с указанным весом/брендом в названии — реалистичные КБЖУ на 100г, confidence не ниже 0.55."
     )
     raw = await call_gemini(prompt)
     m = re.search(r"\{[\s\S]*\}", raw)
@@ -109,30 +110,61 @@ async def gemini_macros(staple: str, off: Optional[Dict[str, Any]]) -> Tuple[Dic
         return {"kcal": 0, "p": 0, "f": 0, "c": 0}, 0.3
 
 
+MEAL_MACRO_KEYS = ("kcal", "p", "f", "c")
+
+
+def macros_only(m: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key in MEAL_MACRO_KEYS:
+        try:
+            out[key] = float(m.get(key, 0))
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    return out
+
+
 def sanity(m: Dict[str, float]) -> bool:
     k = m.get("kcal", 0)
     return 0 < k < 950
+
+
+_WEAK_CAPTION = re.compile(
+    r"^(?:вот|смотри|это|фото|here|ок|ok|да|ну|ага)(?:[!.…]|\s*)*$",
+    re.I,
+)
+
+
+def caption_is_weak_food_hint(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return True
+    if _WEAK_CAPTION.match(s):
+        return True
+    if len(s) <= 4 and not parse_meal_local(s):
+        return True
+    return False
 
 
 async def resolve_staple_macros(staple: str) -> Tuple[Dict[str, Any], float, str]:
     k = cache_key(staple)
     hit = await cache_lookup(k)
     if hit and sanity(hit):
-        return hit, hit.get("conf", 0.9), "cache"
+        return macros_only(hit), hit.get("conf", 0.9), hit.get("src", "cache")
     off = await off_search(staple)
-    if off and all(off.get(x) is not None for x in ("kcal", "p", "f", "c")):
-        data = {"kcal": float(off["kcal"]), "p": float(off["p"]), "f": float(off["f"]), "c": float(off["c"]), "confidence": 0.85}
+    if off and all(off.get(x) is not None for x in MEAL_MACRO_KEYS):
+        data = macros_only(off)
         if sanity(data):
-            await cache_store(k, data, "off")
+            await cache_store(k, {**data, "confidence": 0.85}, "off")
             return data, 0.85, "off"
     data, conf = await gemini_macros(staple, off)
     if off:
         for kk, vv in {"kcal": off.get("kcal"), "p": off.get("p"), "f": off.get("f"), "c": off.get("c")}.items():
             if vv is not None:
                 data[kk] = float(vv)
-    data["confidence"] = conf
+    if sanity(data) and len((staple or "").strip()) >= 12:
+        conf = max(conf, 0.5)
     await cache_store(k, {**data, "confidence": conf}, "off+gemini")
-    return data, conf, "off+gemini"
+    return macros_only(data), conf, "off+gemini"
 
 
 def parse_meal_local(text: str) -> Optional[Tuple[str, float]]:

@@ -14,11 +14,13 @@ from app.common import record_user_chat
 from app.dnd import attach_dnd_handlers
 from app.gemini import call_gemini, download_file_as_base64, transcribe_voice_message
 from app.nutrition.food import (
+    caption_is_weak_food_hint,
     delete_meal,
     find_meal_by_id,
     list_today_meals,
     log_meal_row,
     meal_button_label,
+    parse_meal_local,
     parse_meal_grams,
     resolve_staple_macros,
     sanity,
@@ -214,16 +216,22 @@ async def _process_food_text(message: types.Message, text_override: Optional[str
     txt = (text_override or message.text or "").strip()
     staple, grams = await parse_meal_grams(txt)
     m, conf, _ = await resolve_staple_macros(staple)
+    if parse_meal_local(txt) and sanity(m):
+        conf = max(conf, 0.55)
     if not sanity(m):
-        await message.answer("Странные КБЖУ. Уточни продукт.")
+        await message.answer(
+            "Не смогла оценить КБЖУ по этому описанию.\n"
+            "Напиши продукт и вес, например: <code>сэндвич с курицей 180 г</code>"
+        )
         return
-    if conf < 0.45:
-        await message.answer("Низкая уверенность. Проверь: " + json.dumps(m, ensure_ascii=False))
-        return
+    low_conf = conf < 0.45
     *_, meal_id = await log_meal_row(staple, grams, m)
     kcal = m["kcal"] * grams / 100
+    approx = ""
+    if low_conf:
+        approx = "⚠️ <i>Оценка приблизительная — при необходимости отмени запись кнопкой ниже.</i>\n\n"
     await message.answer(
-        f"{meal_logged_praise(kcal, s.get('goal', ''))}\n\n"
+        f"{approx}{meal_logged_praise(kcal, s.get('goal', ''))}\n\n"
         f"<b>{staple}</b> — {grams:.0f} г\n"
         f"≈ <b>{kcal:.0f}</b> ккал · Б <b>{m['p']*grams/100:.1f}</b> / "
         f"Ж <b>{m['f']*grams/100:.1f}</b> / У <b>{m['c']*grams/100:.1f}</b> г",
@@ -407,11 +415,31 @@ async def food_voice(message: types.Message, bot: Bot):
     await _process_food_text(message, text_override=t)
 
 
+async def _food_text_from_photo_caption(caption: str, b64: str) -> str:
+    cap = (caption or "").strip()
+    if not caption_is_weak_food_hint(cap):
+        return cap
+    desc = await call_gemini(
+        "Опиши еду на фото: название блюда, ключевые ингредиенты, примерный вес в граммах если видно. "
+        "Одна строка на русском, без вступлений.",
+        media_b64=b64,
+        mime_type="image/jpeg",
+    )
+    desc = (desc or "").strip()
+    if cap and not caption_is_weak_food_hint(cap):
+        return f"{desc}. {cap}"
+    return desc or cap
+
+
 @nutrition_router.message(StateFilter(None), F.photo)
 async def photo_any(message: types.Message, bot: Bot):
     b64 = await download_file_as_base64(bot, message.photo[-1].file_id)
     if message.caption:
-        await _process_food_text(message, text_override=message.caption)
+        text = await _food_text_from_photo_caption(message.caption, b64)
+        if not text.strip():
+            await message.answer("Не разобрала фото. Напиши подписью, что это и сколько грамм.")
+            return
+        await _process_food_text(message, text_override=text)
         return
     raw_w = await call_gemini("На фото весы? Если да — число кг одним числом, иначе слово НЕТ.", media_b64=b64, mime_type="image/jpeg")
     m = re.search(r"(\d{2}(?:\.\d)?)", raw_w)
