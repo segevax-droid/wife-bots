@@ -25,7 +25,20 @@ from app.nutrition.food import (
     resolve_staple_macros,
     sanity,
 )
-from app.nutrition.norms import load_norm_targets, recalc_norms_for_user, today_intake
+from app.nutrition.norms import (
+    FAT_G_KG_MAX,
+    FAT_G_KG_MIN,
+    MACRO_G_KG_STEP,
+    PROT_G_KG_MAX,
+    PROT_G_KG_MIN,
+    clamp_fat_g_kg,
+    clamp_prot_g_kg,
+    fat_g_kg_from_rest_share,
+    load_norm_targets,
+    read_macro_prefs,
+    recalc_norms_for_user,
+    today_intake,
+)
 from app.nutrition.ux import bank_message, meal_logged_praise
 from app.sheets import append_row_to_sheet, get_settings_map, get_sheet_rows_for_period, set_setting
 from app.state import now_local
@@ -52,6 +65,7 @@ def _main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💰 Копилка дня", callback_data="nut_bank"),
             InlineKeyboardButton(text="🍽 Приёмы сегодня", callback_data="nut_meals"),
         ],
+        [InlineKeyboardButton(text="🥗 Баланс БЖУ", callback_data="nut_bju")],
         [InlineKeyboardButton(text="🛒 Список покупок", callback_data="nut_shop")],
         [InlineKeyboardButton(text="👤 Профиль заново", callback_data="nut_onboard")],
         [InlineKeyboardButton(text="🌙 Не беспокоить", callback_data="nut_dnd")],
@@ -264,6 +278,7 @@ async def nut_start(message: types.Message, state: FSMContext):
         "🗑 Ошибочный приём — кнопка сразу после записи или «Приёмы сегодня»\n"
         "⚖️ <b>Вес</b> — кнопка или число <code>90</code>\n"
         "💰 <b>Копилка</b> — красивый прогресс БЖУ за день\n"
+        "🥗 <b>Баланс БЖУ</b> — белок г/кг и жиры/углеводы при тех же калориях\n"
         "🛒 <b>Покупки</b> — список от ИИ под твою цель\n\n"
         "Каждое утро в 8:30 мягко напомню взвеситься ☀️",
         reply_markup=_main_kb(),
@@ -451,6 +466,128 @@ async def photo_any(message: types.Message, bot: Bot):
             return
     desc = await call_gemini("Опиши еду на фото одним коротким предложением на русском.", media_b64=b64, mime_type="image/jpeg")
     await _process_food_text(message, text_override=desc)
+
+
+def _bju_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="− белок", callback_data="nut_bju_p:-"),
+                InlineKeyboardButton(text="+ белок", callback_data="nut_bju_p:+"),
+            ],
+            [
+                InlineKeyboardButton(text="− жиры", callback_data="nut_bju_f:-"),
+                InlineKeyboardButton(text="+ жиры", callback_data="nut_bju_f:+"),
+            ],
+            [
+                InlineKeyboardButton(text="Больше У", callback_data="nut_bju_cf:30"),
+                InlineKeyboardButton(text="Баланс", callback_data="nut_bju_cf:45"),
+                InlineKeyboardButton(text="Больше Ж", callback_data="nut_bju_cf:60"),
+            ],
+            [InlineKeyboardButton(text="« Меню", callback_data="nut_menu")],
+        ]
+    )
+
+
+def _bju_text(tgt: Dict[str, float]) -> str:
+    p_kg = tgt["prot_g_kg"]
+    f_kg = tgt["fat_g_kg"]
+    kcal = tgt["kcal"]
+    pk = tgt["p"] * 4
+    fk = tgt["f"] * 9
+    ck = tgt["c"] * 4
+    p_pct = pk / kcal * 100 if kcal > 0 else 0
+    f_pct = fk / kcal * 100 if kcal > 0 else 0
+    c_pct = ck / kcal * 100 if kcal > 0 else 0
+    note = ""
+    if tgt.get("clamped"):
+        note = (
+            "\n\n⚠️ При выбранном белке жиры уперлись в остаток калорий — "
+            "углеводы = 0, сумма ккал не растёт. Уменьши белок или жиры."
+        )
+    return (
+        f"🥗 <b>Баланс БЖУ</b>\n"
+        f"Калории считает бот — <b>{kcal:.0f} ккал</b> не меняются.\n"
+        f"Ты задаёшь белок на кг веса, жиры и углеводы делят остаток.\n\n"
+        f"Белок: <b>{p_kg:.1f} г/кг</b> → {tgt['p']:.0f} г ({p_pct:.0f}% ккал)\n"
+        f"Жиры: <b>{f_kg:.1f} г/кг</b> → {tgt['f']:.0f} г ({f_pct:.0f}% ккал)\n"
+        f"Углеводы: остаток → {tgt['c']:.0f} г ({c_pct:.0f}% ккал)\n\n"
+        f"Шаг ±{MACRO_G_KG_STEP:.1f} г/кг. Белок {PROT_G_KG_MIN:.1f}–{PROT_G_KG_MAX:.1f}, "
+        f"жиры {FAT_G_KG_MIN:.1f}–{FAT_G_KG_MAX:.1f}.\n"
+        f"<i>Больше У / Баланс / Больше Ж</i> — доля жиров в калориях после белка "
+        f"(30% / 45% / 60%)."
+        f"{note}"
+    )
+
+
+async def _show_bju(call: types.CallbackQuery, *, edit: bool) -> None:
+    s = await get_settings_map()
+    tgt = await load_norm_targets(s)
+    if not tgt:
+        await call.answer("Сначала заверши профиль и вес", show_alert=True)
+        return
+    text = _bju_text(tgt)
+    kb = _bju_kb()
+    if edit:
+        try:
+            await call.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            await call.message.answer(text, reply_markup=kb)
+    else:
+        await call.message.answer(text, reply_markup=kb)
+    await call.answer()
+
+
+@nutrition_router.callback_query(F.data == "nut_bju")
+async def cb_bju(call: types.CallbackQuery):
+    await _show_bju(call, edit=False)
+
+
+@nutrition_router.callback_query(F.data.startswith("nut_bju_p:"))
+async def cb_bju_prot(call: types.CallbackQuery):
+    s = await get_settings_map()
+    p, f_ = read_macro_prefs(s)
+    delta = MACRO_G_KG_STEP if call.data.endswith(":+") else -MACRO_G_KG_STEP
+    nxt = clamp_prot_g_kg(p + delta)
+    if nxt == p:
+        await call.answer("Граница диапазона")
+        return
+    await set_setting("prot_g_kg", f"{nxt:.1f}")
+    await recalc_norms_for_user({**s, "prot_g_kg": f"{nxt:.1f}"}, reason="macros", consume_bonus=False)
+    await _show_bju(call, edit=True)
+
+
+@nutrition_router.callback_query(F.data.startswith("nut_bju_f:"))
+async def cb_bju_fat(call: types.CallbackQuery):
+    s = await get_settings_map()
+    p, f_ = read_macro_prefs(s)
+    delta = MACRO_G_KG_STEP if call.data.endswith(":+") else -MACRO_G_KG_STEP
+    nxt = clamp_fat_g_kg(f_ + delta)
+    if nxt == f_:
+        await call.answer("Граница диапазона")
+        return
+    await set_setting("fat_g_kg", f"{nxt:.1f}")
+    await recalc_norms_for_user({**s, "fat_g_kg": f"{nxt:.1f}"}, reason="macros", consume_bonus=False)
+    await _show_bju(call, edit=True)
+
+
+@nutrition_router.callback_query(F.data.startswith("nut_bju_cf:"))
+async def cb_bju_carb_fat(call: types.CallbackQuery):
+    s = await get_settings_map()
+    tgt = await load_norm_targets(s)
+    if not tgt:
+        await call.answer("Сначала заверши профиль и вес", show_alert=True)
+        return
+    try:
+        fat_pct = int(call.data.split(":")[1])
+    except ValueError:
+        await call.answer("Не поняла долю", show_alert=True)
+        return
+    p_kg, _ = read_macro_prefs(s)
+    nxt = fat_g_kg_from_rest_share(tgt["weight_kg"], tgt["base_kcal"], p_kg, fat_pct)
+    await set_setting("fat_g_kg", f"{nxt:.1f}")
+    await recalc_norms_for_user({**s, "fat_g_kg": f"{nxt:.1f}"}, reason="macros", consume_bonus=False)
+    await _show_bju(call, edit=True)
 
 
 @nutrition_router.callback_query(F.data == "nut_bank")
