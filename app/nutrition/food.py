@@ -14,9 +14,94 @@ from app.state import now_local
 
 logger = logging.getLogger("wife_bots")
 
+_MACRO_CACHE_VER = "v2"
+_KBJU_REL_TOL = 0.12
+_RU_STOP = frozenset(
+    {
+        "из",
+        "с",
+        "и",
+        "в",
+        "на",
+        "для",
+        "без",
+        "со",
+        "по",
+        "к",
+        "у",
+        "г",
+        "гр",
+        "пекарни",
+        "пекарня",
+        "магазина",
+        "ресторана",
+    }
+)
+
 
 def cache_key(name: str) -> str:
-    return hashlib.sha256((name or "").strip().lower().encode()).hexdigest()[:24]
+    raw = f"{_MACRO_CACHE_VER}|{(name or '').strip().lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def macro_kcal(m: Dict[str, float]) -> float:
+    return 4.0 * m.get("p", 0) + 4.0 * m.get("c", 0) + 9.0 * m.get("f", 0)
+
+
+def macros_consistent(m: Dict[str, float], rel_tol: float = _KBJU_REL_TOL) -> bool:
+    k = m.get("kcal", 0)
+    if k <= 0:
+        return False
+    mk = macro_kcal(m)
+    if mk <= 0:
+        return False
+    return abs(k - mk) / k <= rel_tol
+
+
+def harmonize_macros(m: Dict[str, float]) -> Dict[str, float]:
+    """На 100 г: согласовать ккал с Б/Ж/У (4·4·9)."""
+    p, f, c = m.get("p", 0), m.get("f", 0), m.get("c", 0)
+    k = m.get("kcal", 0)
+    mk = macro_kcal(m)
+    if mk <= 0 and k > 0:
+        return {"kcal": k, "p": p, "f": f, "c": c}
+    if k <= 0 and mk > 0:
+        return {"kcal": round(mk), "p": p, "f": f, "c": c}
+    if k <= 0:
+        return {"kcal": 0, "p": p, "f": f, "c": c}
+    if abs(k - mk) / k <= 0.08:
+        return {"kcal": round(mk), "p": p, "f": f, "c": c}
+    if mk > 0:
+        ratio = k / mk
+        return {
+            "kcal": k,
+            "p": round(p * ratio, 2),
+            "f": round(f * ratio, 2),
+            "c": round(c * ratio, 2),
+        }
+    return {"kcal": k, "p": p, "f": f, "c": c}
+
+
+def _staple_tokens(text: str) -> set:
+    words = re.findall(r"[a-zа-яё0-9]+", (text or "").lower())
+    return {w for w in words if len(w) >= 4 and w not in _RU_STOP}
+
+
+def off_product_trusted(staple: str, off: Dict[str, Any]) -> bool:
+    off_name = str(off.get("name") or "").strip()
+    if not off_name:
+        return False
+    a, b = _staple_tokens(staple), _staple_tokens(off_name)
+    if not a:
+        return False
+    if not b:
+        return len(a) <= 2
+    overlap = len(a & b)
+    if overlap >= 2:
+        return True
+    if overlap >= 1 and len(a) <= 3:
+        return True
+    return False
 
 
 async def cache_lookup(key: str) -> Optional[Dict[str, Any]]:
@@ -86,11 +171,21 @@ async def off_search(staple: str) -> Optional[Dict[str, Any]]:
 
 
 async def gemini_macros(staple: str, off: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], float]:
-    ctx = json.dumps(off or {}, ensure_ascii=False)[:800]
+    off_block = ""
+    if off and off_product_trusted(staple, off):
+        off_block = f"\nПроверенные данные OFF (тот же продукт): {json.dumps(off, ensure_ascii=False)[:800]}"
+    brand_hint = ""
+    if re.search(r"хлебник|xleb", staple, re.I):
+        brand_hint = (
+            "\nБренд Хлебник / xleb.ru — ориентируйся на КБЖУ этого блюда у бренда, "
+            "не на «среднюю выпечку» и не на другой продукт из OFF."
+        )
     prompt = (
-        f"Продукт: {staple}\nДанные OFF: {ctx}\n"
-        "Верни JSON: {\"kcal\":..,\"p\":..,\"f\":..,\"c\":..} на 100г, \"confidence\":0..1. "
-        "Для готового блюда с указанным весом/брендом в названии — реалистичные КБЖУ на 100г, confidence не ниже 0.55."
+        f"Продукт (РФ): {staple}{off_block}{brand_hint}\n"
+        "Верни JSON: {\"kcal\":..,\"p\":..,\"f\":..,\"c\":..} на 100 г готового продукта, \"confidence\":0..1.\n"
+        "Правила: kcal в пределах ±7% от 4×белки+4×углеводы+9×жиры; "
+        "если в тексте бренд/сеть — КБЖУ именно этого блюда; "
+        "готовые сэндвичи/фокаччи с начинкой — не как сухой хлеб."
     )
     raw = await call_gemini(prompt)
     m = re.search(r"\{[\s\S]*\}", raw)
@@ -100,12 +195,17 @@ async def gemini_macros(staple: str, off: Optional[Dict[str, Any]]) -> Tuple[Dic
     try:
         j = json.loads(m.group(0))
         conf = float(j.get("confidence", 0.7))
-        return {
-            "kcal": float(j.get("kcal", 0)),
-            "p": float(j.get("p", 0)),
-            "f": float(j.get("f", 0)),
-            "c": float(j.get("c", 0)),
-        }, conf
+        data = harmonize_macros(
+            {
+                "kcal": float(j.get("kcal", 0)),
+                "p": float(j.get("p", 0)),
+                "f": float(j.get("f", 0)),
+                "c": float(j.get("c", 0)),
+            }
+        )
+        if not macros_consistent(data):
+            conf = min(conf, 0.45)
+        return data, conf
     except Exception:
         return {"kcal": 0, "p": 0, "f": 0, "c": 0}, 0.3
 
@@ -149,22 +249,35 @@ async def resolve_staple_macros(staple: str) -> Tuple[Dict[str, Any], float, str
     k = cache_key(staple)
     hit = await cache_lookup(k)
     if hit and sanity(hit):
-        return macros_only(hit), hit.get("conf", 0.9), hit.get("src", "cache")
+        data = harmonize_macros(macros_only(hit))
+        if macros_consistent(data):
+            return data, hit.get("conf", 0.9), hit.get("src", "cache")
     off = await off_search(staple)
-    if off and all(off.get(x) is not None for x in MEAL_MACRO_KEYS):
-        data = macros_only(off)
-        if sanity(data):
+    off_ok = bool(off and off_product_trusted(staple, off))
+    if off_ok and all(off.get(x) is not None for x in MEAL_MACRO_KEYS):
+        data = harmonize_macros(macros_only(off))
+        if sanity(data) and macros_consistent(data):
             await cache_store(k, {**data, "confidence": 0.85}, "off")
             return data, 0.85, "off"
-    data, conf = await gemini_macros(staple, off)
-    if off:
-        for kk, vv in {"kcal": off.get("kcal"), "p": off.get("p"), "f": off.get("f"), "c": off.get("c")}.items():
+    data, conf = await gemini_macros(staple, off if off_ok else None)
+    if off_ok:
+        merged = dict(data)
+        for kk, vv in {
+            "kcal": off.get("kcal"),
+            "p": off.get("p"),
+            "f": off.get("f"),
+            "c": off.get("c"),
+        }.items():
             if vv is not None:
-                data[kk] = float(vv)
+                merged[kk] = float(vv)
+        data = harmonize_macros(merged)
+        if macros_consistent(data):
+            conf = max(conf, 0.75)
     if sanity(data) and len((staple or "").strip()) >= 12:
         conf = max(conf, 0.5)
-    await cache_store(k, {**data, "confidence": conf}, "off+gemini")
-    return macros_only(data), conf, "off+gemini"
+    src = "gemini" if not off_ok else "off+gemini"
+    await cache_store(k, {**data, "confidence": conf}, src)
+    return macros_only(data), conf, src
 
 
 def parse_meal_local(text: str) -> Optional[Tuple[str, float]]:
