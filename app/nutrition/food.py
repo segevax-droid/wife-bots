@@ -9,7 +9,13 @@ from urllib.parse import quote_plus
 from aiohttp import ClientSession, ClientTimeout
 
 from app.gemini import call_gemini
-from app.sheets import append_row_to_sheet, delete_sheet_row, get_worksheet, get_ws_values
+from app.sheets import (
+    append_row_to_sheet,
+    delete_sheet_row,
+    get_worksheet,
+    get_ws_values,
+    update_sheet_row_cells,
+)
 from app.state import now_local
 
 logger = logging.getLogger("wife_bots")
@@ -245,13 +251,187 @@ def caption_is_weak_food_hint(text: str) -> bool:
     return False
 
 
+async def my_product_lookup(staple: str) -> Optional[Dict[str, float]]:
+    s = (staple or "").strip().lower()
+    if len(s) < 2:
+        return None
+    ws = await get_worksheet("Мои_продукты")
+    if not ws:
+        return None
+    rows = await get_ws_values(ws)
+    best: Optional[Dict[str, float]] = None
+    best_len = 0
+    tokens = _staple_tokens(staple)
+    for r in rows[1:]:
+        if len(r) < 5:
+            continue
+        name = str(r[0]).strip().lower()
+        alias = str(r[1]).strip().lower() if len(r) > 1 else ""
+        if not name:
+            continue
+        matched = name in s or s in name
+        if alias and (alias in s or s in alias):
+            matched = True
+        if not matched and tokens:
+            keys = _staple_tokens(name) | _staple_tokens(alias)
+            if keys and len(tokens & keys) >= 1 and len(name) >= 3:
+                matched = True
+        if not matched:
+            continue
+        try:
+            data = {
+                "kcal": float(str(r[2]).replace(",", ".")),
+                "p": float(str(r[3]).replace(",", ".")),
+                "f": float(str(r[4]).replace(",", ".")),
+                "c": float(str(r[5]).replace(",", ".")) if len(r) > 5 else 0.0,
+            }
+        except Exception:
+            continue
+        if not sanity(data):
+            continue
+        key_len = max(len(name), len(alias))
+        if key_len >= best_len:
+            best_len = key_len
+            best = harmonize_macros(data)
+    return best
+
+
+def _num(s: str) -> float:
+    return float(str(s).replace(",", ".").strip())
+
+
+def _macros_per100_from_portion(
+    grams: float, kcal: Optional[float] = None, p: Optional[float] = None, f: Optional[float] = None, c: Optional[float] = None
+) -> Optional[Dict[str, float]]:
+    if grams <= 0:
+        return None
+    scale = 100.0 / grams
+    out: Dict[str, float] = {}
+    if kcal is not None:
+        out["kcal"] = kcal * scale
+    if p is not None:
+        out["p"] = p * scale
+    if f is not None:
+        out["f"] = f * scale
+    if c is not None:
+        out["c"] = c * scale
+    if len(out) < 2 and kcal is None:
+        return None
+    for key in MEAL_MACRO_KEYS:
+        out.setdefault(key, 0.0)
+    data = harmonize_macros(out)
+    return data if sanity(data) else None
+
+
+_RE_PER100 = re.compile(
+    r"(?:на\s+)?100\s*(?:г|гр|g)\s*[:·\-]\s*"
+    r"(\d+(?:[.,]\d+)?)(?:\s+(\d+(?:[.,]\d+)?))?(?:\s+(\d+(?:[.,]\d+)?))?(?:\s+(\d+(?:[.,]\d+)?))?",
+    re.I,
+)
+_RE_KCAL = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:ккал|kcal)\b", re.I)
+_RE_BJU_SLASH = re.compile(
+    r"б\s*/\s*ж\s*/\s*у\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)",
+    re.I,
+)
+_RE_BJU_WORDS = re.compile(
+    r"б(?:ел)?\s*(\d+(?:[.,]\d+)?)\s*ж(?:ир)?\s*(\d+(?:[.,]\d+)?)\s*у(?:гл)?\s*(\d+(?:[.,]\d+)?)",
+    re.I,
+)
+
+
+def _extract_macro_fields(s: str) -> Tuple[str, bool, Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Возвращает (очищенный текст, per100_явно, kcal, p, f, c)."""
+    per100 = False
+    kcal = p = f = c = None
+    m = _RE_PER100.search(s)
+    if m:
+        per100 = True
+        kcal = _num(m.group(1))
+        if m.group(2):
+            p, f, c = _num(m.group(2)), _num(m.group(3) or "0"), _num(m.group(4) or "0")
+        s = s[: m.start()] + s[m.end() :]
+    m = _RE_BJU_SLASH.search(s)
+    if m:
+        p, f, c = _num(m.group(1)), _num(m.group(2)), _num(m.group(3))
+        s = s[: m.start()] + s[m.end() :]
+    else:
+        m = _RE_BJU_WORDS.search(s)
+        if m:
+            p, f, c = _num(m.group(1)), _num(m.group(2)), _num(m.group(3))
+            s = s[: m.start()] + s[m.end() :]
+    m = _RE_KCAL.search(s)
+    if m:
+        kcal = _num(m.group(1))
+        s = s[: m.start()] + s[m.end() :]
+    return re.sub(r"\s+", " ", s).strip(" ·—-\t"), per100, kcal, p, f, c
+
+
+def parse_macros_snippet(text: str, grams: float) -> Optional[Dict[str, float]]:
+    """Только цифры (после «Как на этикетке») — на 100г или на порцию grams."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    cleaned, per100, kcal, p, f, c = _extract_macro_fields(s)
+    if per100 and kcal is not None:
+        data = {"kcal": kcal, "p": p or 0, "f": f or 0, "c": c or 0}
+        data = harmonize_macros(data)
+        return data if sanity(data) else None
+    if kcal is not None or any(x is not None for x in (p, f, c)):
+        portion = _macros_per100_from_portion(grams, kcal, p, f, c)
+        if portion:
+            return portion
+    if cleaned:
+        nums = re.findall(r"\d+(?:[.,]\d+)?", cleaned)
+        if len(nums) >= 4:
+            data = harmonize_macros(
+                {"kcal": _num(nums[0]), "p": _num(nums[1]), "f": _num(nums[2]), "c": _num(nums[3])}
+            )
+            return data if sanity(data) else None
+        if len(nums) == 1 and kcal is None:
+            data = harmonize_macros({"kcal": _num(nums[0]), "p": 0, "f": 0, "c": 0})
+            return data if sanity(data) else None
+    return None
+
+
+def parse_meal_with_manual_macros(text: str) -> Optional[Dict[str, Any]]:
+    s = (text or "").strip()
+    if not s:
+        return None
+    cleaned, per100, kcal, p, f, c = _extract_macro_fields(s)
+    has_macros = per100 or kcal is not None or any(x is not None for x in (p, f, c))
+    if not has_macros:
+        return None
+    local = parse_meal_local(cleaned) or parse_meal_local(s)
+    if not local:
+        return None
+    staple, grams = local
+    if per100 and kcal is not None:
+        m = harmonize_macros({"kcal": kcal, "p": p or 0, "f": f or 0, "c": c or 0})
+    else:
+        m = _macros_per100_from_portion(grams, kcal, p, f, c)
+    if not m or not sanity(m):
+        return None
+    return {"staple": staple, "grams": grams, "per100": m}
+
+
+async def store_manual_macros(staple: str, per100: Dict[str, float]) -> None:
+    k = cache_key(staple)
+    await cache_store(k, {**per100, "confidence": 1.0}, "ручная")
+
+
 async def resolve_staple_macros(staple: str) -> Tuple[Dict[str, Any], float, str]:
+    custom = await my_product_lookup(staple)
+    if custom and macros_consistent(custom):
+        return macros_only(custom), 1.0, "мои_продукты"
     k = cache_key(staple)
     hit = await cache_lookup(k)
     if hit and sanity(hit):
         data = harmonize_macros(macros_only(hit))
         if macros_consistent(data):
-            return data, hit.get("conf", 0.9), hit.get("src", "cache")
+            conf = hit.get("conf", 0.9)
+            if hit.get("src") == "ручная":
+                conf = max(conf, 1.0)
+            return data, conf, hit.get("src", "cache")
     off = await off_search(staple)
     off_ok = bool(off and off_product_trusted(staple, off))
     if off_ok and all(off.get(x) is not None for x in MEAL_MACRO_KEYS):
@@ -408,6 +588,34 @@ def meal_button_label(meal: Dict[str, Any]) -> str:
     grams = meal.get("grams") or 0
     prefix = f"✕ {t} " if t else "✕ "
     return f"{prefix}{name} {grams:.0f}г"[:64]
+
+
+async def update_meal_row(
+    sheet_row: int,
+    staple: str,
+    grams: float,
+    m: Dict[str, float],
+) -> Tuple[float, float, float, float]:
+    scale = grams / 100.0
+    kcal = m.get("kcal", 0) * scale
+    p = m.get("p", 0) * scale
+    f = m.get("f", 0) * scale
+    c = m.get("c", 0) * scale
+    ok = await update_sheet_row_cells(
+        "Питание",
+        sheet_row,
+        {
+            3: staple,
+            4: f"{grams:.0f}",
+            5: f"{p:.1f}",
+            6: f"{f:.1f}",
+            7: f"{c:.1f}",
+            8: f"{kcal:.0f}",
+        },
+    )
+    if not ok:
+        return 0.0, 0.0, 0.0, 0.0
+    return p, f, c, kcal
 
 
 async def log_meal_row(staple: str, grams: float, m: Dict[str, float]) -> Tuple[float, float, float, float, str]:

@@ -209,6 +209,15 @@ async def append_row_to_sheet(sheet_name: str, row: list) -> Tuple[bool, str]:
         return await _append_row_unlocked(sheet_name, row)
 
 
+async def update_sheet_row_cells(sheet_name: str, row_idx: int, cells: Dict[int, str]) -> bool:
+    """col_idx — 1-based, как в gspread update_cell."""
+    async with sheet_write_lock(sheet_name):
+        for col_idx, val in sorted(cells.items()):
+            if not await _update_sheet_cell_unlocked(sheet_name, row_idx, col_idx, val):
+                return False
+    return True
+
+
 async def _delete_row_unlocked(sheet_name: str, row_idx: int) -> bool:
     try:
         ws = await get_worksheet(sheet_name)
@@ -299,6 +308,7 @@ async def ensure_sheets() -> None:
         "Питание": ["Дата", "Время", "Прием", "Вес_г", "Б", "Ж", "У", "Ккал", "Комментарий"],
         "Вес_Динамика": ["Дата и время", "Вес кг", "Источник", "Комментарий ИИ"],
         "Продукты_кэш": ["ключ", "kcal_100g", "б_100g", "ж_100g", "у_100g", "источник", "уверенность", "json"],
+        "Мои_продукты": ["название", "алиас", "kcal_100g", "б_100g", "ж_100g", "у_100g"],
         "Нормы_КБЖУ": [
             "дата",
             "вес",

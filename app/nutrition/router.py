@@ -20,10 +20,14 @@ from app.nutrition.food import (
     list_today_meals,
     log_meal_row,
     meal_button_label,
+    parse_macros_snippet,
     parse_meal_local,
     parse_meal_grams,
+    parse_meal_with_manual_macros,
     resolve_staple_macros,
     sanity,
+    store_manual_macros,
+    update_meal_row,
 )
 from app.nutrition.norms import (
     FAT_G_KG_MAX,
@@ -58,6 +62,10 @@ class NutWeigh(StatesGroup):
     waiting = State()
 
 
+class NutLabelFix(StatesGroup):
+    waiting = State()
+
+
 def _main_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="⚖️ Записать вес", callback_data="nut_weigh")],
@@ -83,7 +91,12 @@ def _weigh_kb() -> InlineKeyboardMarkup:
 def _after_food_kb(meal_id: str = "") -> InlineKeyboardMarkup:
     rows = []
     if meal_id:
-        rows.append([InlineKeyboardButton(text="🗑 Отменить запись", callback_data=f"nut_mu:{meal_id}")])
+        rows.append(
+            [
+                InlineKeyboardButton(text="✏️ Как на этикетке", callback_data=f"nut_mf:{meal_id}"),
+                InlineKeyboardButton(text="🗑 Отменить", callback_data=f"nut_mu:{meal_id}"),
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(text="💰 Копилка", callback_data="nut_bank"),
@@ -222,33 +235,59 @@ async def _settings_complete(s: Dict[str, str]) -> bool:
     return _profile_base_ok(s) and bool(str(s.get("weight_kg", "")).strip())
 
 
+def _meal_reply_text(
+    staple: str,
+    grams: float,
+    m: Dict[str, float],
+    *,
+    goal: str,
+    manual: bool,
+    low_conf: bool,
+) -> str:
+    kcal = m["kcal"] * grams / 100
+    if manual:
+        tag = "📋 <i>Цифры с этикетки — сохранила и запомню продукт.</i>\n\n"
+    elif low_conf:
+        tag = "⚠️ <i>Оценка приблизительная — «Как на этикетке» или отмена ниже.</i>\n\n"
+    else:
+        tag = ""
+    return (
+        f"{tag}{meal_logged_praise(kcal, goal)}\n\n"
+        f"<b>{staple}</b> — {grams:.0f} г\n"
+        f"{' ' if manual else '≈ '}<b>{kcal:.0f}</b> ккал · Б <b>{m['p']*grams/100:.1f}</b> / "
+        f"Ж <b>{m['f']*grams/100:.1f}</b> / У <b>{m['c']*grams/100:.1f}</b> г"
+    )
+
+
 async def _process_food_text(message: types.Message, text_override: Optional[str] = None) -> None:
     s = await get_settings_map()
     if not await _settings_complete(s):
         await message.answer("Сначала заверши онбординг (/start).")
         return
     txt = (text_override or message.text or "").strip()
-    staple, grams = await parse_meal_grams(txt)
-    m, conf, _ = await resolve_staple_macros(staple)
-    if parse_meal_local(txt) and sanity(m):
-        conf = max(conf, 0.55)
+    manual = parse_meal_with_manual_macros(txt)
+    if manual:
+        staple, grams = manual["staple"], manual["grams"]
+        m = manual["per100"]
+        conf = 1.0
+        await store_manual_macros(staple, m)
+    else:
+        staple, grams = await parse_meal_grams(txt)
+        m, conf, _ = await resolve_staple_macros(staple)
+        if parse_meal_local(txt) and sanity(m):
+            conf = max(conf, 0.55)
     if not sanity(m):
         await message.answer(
-            "Не смогла оценить КБЖУ по этому описанию.\n"
-            "Напиши продукт и вес, например: <code>сэндвич с курицей 180 г</code>"
+            "Не смогла оценить КБЖУ.\n"
+            "Продукт и вес: <code>сэндвич 180 г</code>\n"
+            "С этикетки: <code>творог 150 г · 100г: 121 18 4 3</code> или "
+            "<code>йогурт 150г 180ккал б15 ж3 у20</code>"
         )
         return
     low_conf = conf < 0.45
     *_, meal_id = await log_meal_row(staple, grams, m)
-    kcal = m["kcal"] * grams / 100
-    approx = ""
-    if low_conf:
-        approx = "⚠️ <i>Оценка приблизительная — при необходимости отмени запись кнопкой ниже.</i>\n\n"
     await message.answer(
-        f"{approx}{meal_logged_praise(kcal, s.get('goal', ''))}\n\n"
-        f"<b>{staple}</b> — {grams:.0f} г\n"
-        f"≈ <b>{kcal:.0f}</b> ккал · Б <b>{m['p']*grams/100:.1f}</b> / "
-        f"Ж <b>{m['f']*grams/100:.1f}</b> / У <b>{m['c']*grams/100:.1f}</b> г",
+        _meal_reply_text(staple, grams, m, goal=s.get("goal", ""), manual=bool(manual), low_conf=low_conf),
         reply_markup=_after_food_kb(meal_id),
     )
 
@@ -274,8 +313,10 @@ async def nut_start(message: types.Message, state: FSMContext):
         return
     await message.answer(
         "Привет! Я рядом с питанием 💛\n\n"
-        "🍽 <b>Еда</b> — текст, голос или фото («овсянка 200г»)\n"
-        "🗑 Ошибочный приём — кнопка сразу после записи или «Приёмы сегодня»\n"
+        "🍽 <b>Еда</b> — текст, голос или фото (<code>овсянка 200г</code>)\n"
+        "📋 Этикетка в той же строке: <code>творог 150г · 100г: 121 18 4 3</code>\n"
+        "✏️ После записи — «Как на этикетке», если цифры неточные\n"
+        "🗑 Ошибочный приём — отмена после записи или «Приёмы сегодня»\n"
         "⚖️ <b>Вес</b> — кнопка или число <code>90</code>\n"
         "💰 <b>Копилка</b> — красивый прогресс БЖУ за день\n"
         "🥗 <b>Баланс БЖУ</b> — белок г/кг и жиры/углеводы при тех же калориях\n"
@@ -401,6 +442,78 @@ async def weight_number(message: types.Message):
         await _process_food_text(message)
         return
     await _save_weight(message, w)
+
+
+@nutrition_router.callback_query(F.data.startswith("nut_mf:"))
+async def cb_meal_label_fix(call: types.CallbackQuery, state: FSMContext):
+    meal_id = call.data.split(":", 1)[1]
+    meal = await find_meal_by_id(meal_id)
+    if not meal:
+        await call.answer("Запись не найдена", show_alert=True)
+        return
+    await state.set_state(NutLabelFix.waiting)
+    await state.update_data(meal_id=meal_id)
+    await call.message.answer(
+        f"✏️ <b>{meal['name']}</b>, {meal['grams']:.0f} г\n"
+        "Пришли цифры одной строкой:\n"
+        "• на 100 г: <code>121 18 4 3</code> или <code>100г: 250 10 5 30</code>\n"
+        "• на порцию: <code>580 ккал б25 ж18 у45</code>\n"
+        f"• полная строка: <code>{meal['name']} {meal['grams']:.0f}г · 100г: …</code>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="« Отмена", callback_data="nut_mf_cancel")]]
+        ),
+    )
+    await call.answer()
+
+
+@nutrition_router.callback_query(F.data == "nut_mf_cancel")
+async def cb_meal_label_cancel(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.answer("Ок, запись без изменений.", reply_markup=_main_kb())
+    await call.answer()
+
+
+@nutrition_router.message(NutLabelFix.waiting, F.text | F.voice)
+async def meal_label_fix_text(message: types.Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    meal_id = str(data.get("meal_id") or "")
+    meal = await find_meal_by_id(meal_id)
+    if not meal:
+        await state.clear()
+        await message.answer("Запись уже нет — начни снова из меню.", reply_markup=_main_kb())
+        return
+    txt = message.text or ""
+    if message.voice:
+        txt = await transcribe_voice_message(bot, message) or ""
+    manual = parse_meal_with_manual_macros(txt)
+    if manual:
+        staple, grams, m = manual["staple"], manual["grams"], manual["per100"]
+    else:
+        staple, grams = meal["name"], float(meal["grams"])
+        m = parse_macros_snippet(txt, grams)
+    if not m or not sanity(m):
+        await message.answer(
+            "Не разобрала цифры. Пример: <code>100г: 121 18 4 3</code> или <code>420 ккал б25 ж15 у30</code>"
+        )
+        return
+    await store_manual_macros(staple, m)
+    p, f_, c, kcal = await update_meal_row(int(meal["sheet_row"]), staple, grams, m)
+    if kcal <= 0 and p <= 0:
+        await message.answer("Не удалось обновить таблицу — попробуй ещё раз.")
+        return
+    await state.clear()
+    s = await get_settings_map()
+    m_scaled = {
+        "kcal": m["kcal"],
+        "p": m["p"],
+        "f": m["f"],
+        "c": m["c"],
+    }
+    await message.answer(
+        "✅ Обновила запись.\n\n"
+        + _meal_reply_text(staple, grams, m_scaled, goal=s.get("goal", ""), manual=True, low_conf=False),
+        reply_markup=_after_food_kb(meal_id),
+    )
 
 
 @nutrition_router.message(StateFilter(None), F.text & ~F.text.regexp(r"^\s*\d{2,3}([.,]\d)?\s*$"))
